@@ -3,416 +3,181 @@ from tkinter import ttk, messagebox, scrolledtext
 import pandas as pd
 import re
 from collections import defaultdict
-from typing import Dict, List, Tuple, Optional, Any, Set
+from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, field
 import math
 import os
 
 # ============================================================
-# 1. HELPER FUNCTIONS
+# 40K 11TH EDITION MATHHAMMER
+# - exact hit/wound/save probabilities
+# - exact variable Attacks/Damage dice distributions
+# - correct AP sign handling
+# - correct Sustained/Lethal/Anti/Devastating interaction
+# - 11th ed Heavy, Cover, Blast X and Cleave X handling
+# - wargear selections modify the real equipped weapon counts
 # ============================================================
 
-def parse_stat_value(value_str, default: int = 4) -> int:
-    """Parse a stat value that might have special characters."""
-    if pd.isna(value_str) or value_str == '' or value_str == '-':
-        return default
-    
-    value_str = str(value_str).strip()
-    
-    if '*' in value_str:
-        match = re.search(r'(\d+)', value_str)
-        if match:
-            return int(match.group(1))
-        return default
-    
-    if value_str.upper() == 'N/A':
-        return default
-    
-    try:
-        return int(value_str)
-    except ValueError:
-        match = re.search(r'(\d+)', value_str)
-        if match:
-            return int(match.group(1))
-        return default
 
+# ============================================================
+# 1. GENERIC HELPERS
+# ============================================================
 
-def parse_save_value(value_str, default: int = 4) -> int:
-    """Parse a save value like '4+' or '4'."""
-    if pd.isna(value_str) or value_str == '' or value_str == '-':
-        return default
-    
-    value_str = str(value_str).strip()
-    value_str = value_str.replace('+', '')
-    
-    if '*' in value_str:
-        match = re.search(r'(\d+)', value_str)
-        if match:
-            return int(match.group(1))
-        return default
-    
-    if value_str.upper() == 'N/A':
-        return default
-    
-    try:
-        return int(value_str)
-    except ValueError:
-        match = re.search(r'(\d+)', value_str)
-        if match:
-            return int(match.group(1))
-        return default
-
-
-def parse_dice(dice_str: str) -> Tuple[int, int, int]:
-    """Parse dice notation like 'D6', '2D3+1' etc."""
-    if pd.isna(dice_str) or dice_str == '' or dice_str == '0':
-        return (0, 0, 0)
-    
-    dice_str = str(dice_str).strip().upper()
-    if dice_str == 'N/A' or dice_str == '-':
-        return (0, 0, 0)
-    
-    if dice_str == 'D3' or dice_str == 'D6':
-        return (1, int(dice_str[1]), 0)
-    
-    pattern = r'^(\d*)[Dd](\d+)([+-]\d+)?$'
-    match = re.match(pattern, dice_str)
-    if not match:
-        num_match = re.search(r'(\d+)', dice_str)
-        if num_match:
-            return (1, 1, int(num_match.group(1)))
-        return (0, 0, 0)
-    
-    num = match.group(1)
-    sides = int(match.group(2))
-    mod = match.group(3)
-    return (int(num) if num else 1, sides, int(mod) if mod else 0)
-
-
-def parse_keywords(desc: str) -> Dict[str, Any]:
-    """Parse weapon keywords from description."""
-    if pd.isna(desc) or desc == '':
-        return {}
-    desc = str(desc).lower().strip()
-    keywords = {}
-    
-    value_flags = ['rapid fire', 'sustained hits', 'melta', 'blast']
-    for flag in value_flags:
-        match = re.search(rf'{re.escape(flag)}\s*\(?\s*(\d+)\s*\)?', desc)
-        if match:
-            keywords[flag.replace(' ', '_')] = int(match.group(1))
-    
-    for match in re.finditer(r'anti-(\w+)\s*([\d+]+)', desc):
-        anti_type = match.group(1).replace('-', '_')
-        anti_value = int(match.group(2).replace('+', ''))
-        keywords[f'anti_{anti_type}'] = anti_value
-    
-    blast_x = re.search(r'blast\s*\(\s*(\d+)\s*\)', desc)
-    if blast_x:
-        keywords['blast_x'] = int(blast_x.group(1))
-        keywords['blast'] = True
-    
-    cleave_x = re.search(r'cleave\s*\(\s*(\d+)\s*\)', desc)
-    if cleave_x:
-        keywords['cleave_x'] = int(cleave_x.group(1))
-        keywords['cleave'] = True
-    
-    bool_flags = ['torrent', 'twin-linked', 'heavy', 'assault', 'pistol', 'lance',
-                  'devastating wounds', 'lethal hits', 'ignores cover', 'hazardous',
-                  'psychic', 'indirect fire', 'one shot', 'extra attacks', 'precision']
-    for flag in bool_flags:
-        if flag in desc:
-            keywords[flag.replace(' ', '_')] = True
-    
-    if 'close-quarters' in desc:
-        keywords['close_quarters'] = True
-    
-    return keywords
-
-
-def clean_html(text: str) -> str:
-    """Remove HTML tags and clean up text."""
+def clean_html(text: Any) -> str:
     if pd.isna(text) or text == '':
         return ''
     text = str(text)
+    text = re.sub(r'<br\s*/?>', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'\s+', ' ', text)
-    text = text.replace('•', '·').strip()
+    text = text.replace('&nbsp;', ' ')
+    text = text.replace('•', '·')
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def parse_int(value: Any, default: int = 0) -> int:
+    if pd.isna(value) or value in ('', '-', 'N/A'):
+        return default
+    match = re.search(r'-?\d+', str(value))
+    return int(match.group(0)) if match else default
+
+
+def parse_save_value(value: Any, default: int = 7) -> int:
+    if pd.isna(value) or value in ('', '-', 'N/A'):
+        return default
+    match = re.search(r'\d+', str(value))
+    return int(match.group(0)) if match else default
+
+
+def parse_dice(value: Any) -> Tuple[int, int, int]:
+    """Return (number_of_dice, sides, flat_modifier)."""
+    if pd.isna(value):
+        return (0, 0, 0)
+    text = str(value).strip().upper().replace(' ', '')
+    if text in ('', '-', 'N/A', '0'):
+        return (0, 0, 0)
+    if re.fullmatch(r'-?\d+', text):
+        return (0, 0, int(text))
+    match = re.fullmatch(r'(\d*)D(\d+)([+-]\d+)?', text)
+    if match:
+        return (
+            int(match.group(1) or 1),
+            int(match.group(2)),
+            int(match.group(3) or 0),
+        )
+    # Last-resort fallback: treat the first integer as a flat value.
+    match = re.search(r'-?\d+', text)
+    return (0, 0, int(match.group(0))) if match else (0, 0, 0)
+
+
+def dice_to_string(dice: Tuple[int, int, int]) -> str:
+    n, sides, mod = dice
+    if n <= 0 or sides <= 0:
+        return str(mod)
+    text = f"{'' if n == 1 else n}D{sides}"
+    if mod > 0:
+        text += f"+{mod}"
+    elif mod < 0:
+        text += str(mod)
     return text
 
 
-def extract_weapon_name(text: str) -> str:
-    """Extract weapon name from option text."""
-    # Remove common prefixes
-    text = re.sub(r'^(his|the|one|any|up to|for every|each|all)\s+', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'^(model\'s|models\'|model|models)\s+', '', text, flags=re.IGNORECASE)
-    
-    # Look for weapon patterns
-    patterns = [
-        r'(\w+\s+\w+\s+\w+)\s+(?:can be replaced|can be equipped|replaced with)',
-        r'(\w+\s+\w+)\s+(?:can be replaced|can be equipped|replaced with)',
-        r'(\w+)\s+(?:can be replaced|can be equipped|replaced with)',
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+def convolve_distributions(a: Dict[int, float], b: Dict[int, float]) -> Dict[int, float]:
+    out: Dict[int, float] = defaultdict(float)
+    for va, pa in a.items():
+        for vb, pb in b.items():
+            out[va + vb] += pa * pb
+    return dict(out)
+
+
+def dice_distribution(dice: Tuple[int, int, int], extra: int = 0) -> Dict[int, float]:
+    n, sides, mod = dice
+    if n <= 0 or sides <= 0:
+        return {max(0, mod + extra): 1.0}
+    dist: Dict[int, float] = {0: 1.0}
+    one_die = {face: 1.0 / sides for face in range(1, sides + 1)}
+    for _ in range(n):
+        dist = convolve_distributions(dist, one_die)
+    result: Dict[int, float] = defaultdict(float)
+    for value, prob in dist.items():
+        result[max(0, value + mod + extra)] += prob
+    return dict(result)
+
+
+def average_distribution(dist: Dict[int, float]) -> float:
+    return sum(value * prob for value, prob in dist.items())
+
+
+def clamp_modifier(value: int) -> int:
+    """Hit/wound modifiers are capped at +/-1 in the core attack sequence."""
+    return max(-1, min(1, value))
+
+
+def keyword_key(text: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+
+
+def canonical_equipment_name(text: str) -> str:
+    text = clean_html(text).strip(' .;,:')
+    text = re.sub(r'^(?:an?|the)\s+', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\d+\s*[x×]?\s+', '', text, flags=re.IGNORECASE)
+    return text.strip(' .;,:')
+
+
+# ============================================================
+# 2. WEAPON KEYWORDS AND DATA CLASSES
+# ============================================================
+
+def parse_keywords(description: Any) -> Dict[str, Any]:
+    text = clean_html(description).lower()
+    kw: Dict[str, Any] = {}
+
+    # Valued abilities. 11th edition Blast/Cleave can explicitly carry X.
+    valued_patterns = {
+        'rapid_fire': r'rapid\s+fire\s*\(?\s*(\d+)\s*\)?',
+        'sustained_hits': r'sustained\s+hits\s*\(?\s*(\d+)\s*\)?',
+        'melta': r'melta\s*\(?\s*(\d+)\s*\)?',
+        'blast_x': r'blast\s*\(?\s*(\d+)\s*\)?',
+        'cleave_x': r'cleave\s*\(?\s*(\d+)\s*\)?',
+    }
+    for key, pattern in valued_patterns.items():
+        match = re.search(pattern, text)
         if match:
-            return match.group(1).strip()
-    
-    # If it's a simple "X can be replaced with Y"
-    match = re.search(r'^(.*?)\s+can be replaced', text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    
-    return text[:30]
+            kw[key] = int(match.group(1))
 
+    if 'blast' in text:
+        kw['blast'] = True
+        kw.setdefault('blast_x', 1)
+    if 'cleave' in text:
+        kw['cleave'] = True
+        kw.setdefault('cleave_x', 1)
 
-# ============================================================
-# 2. ENHANCED WARGEAR DATA CLASSES
-# ============================================================
+    # Anti-X N+ => Critical Wound on an unmodified N+ against matching keyword.
+    for match in re.finditer(r'anti[-\s]+([a-z0-9 -]+?)\s+(\d)\+', text):
+        target = keyword_key(match.group(1))
+        kw[f'anti_{target}'] = int(match.group(2))
 
-@dataclass
-class ModelEquipment:
-    """Represents a single model's equipment."""
-    model_name: str
-    weapons: List[str] = field(default_factory=list)
-    wargear: List[str] = field(default_factory=list)
-    is_character: bool = False
-    
-    def clone(self) -> 'ModelEquipment':
-        return ModelEquipment(
-            model_name=self.model_name,
-            weapons=self.weapons.copy(),
-            wargear=self.wargear.copy(),
-            is_character=self.is_character
-        )
-    
-    def get_display_string(self) -> str:
-        parts = []
-        if self.weapons:
-            parts.append(", ".join(self.weapons))
-        if self.wargear:
-            parts.append(", ".join(self.wargear))
-        return ": ".join(parts) if parts else ""
+    bool_flags = {
+        'torrent': r'\btorrent\b',
+        'twin_linked': r'\btwin[- ]linked\b',
+        'heavy': r'\bheavy\b',
+        'assault': r'\bassault\b',
+        'pistol': r'\bpistol\b',
+        'lance': r'\blance\b',
+        'devastating_wounds': r'\bdevastating\s+wounds\b',
+        'lethal_hits': r'\blethal\s+hits\b',
+        'ignores_cover': r'\bignores\s+cover\b',
+        'hazardous': r'\bhazardous\b',
+        'psychic': r'\bpsychic\b',
+        'indirect_fire': r'\bindirect\s+fire\b',
+        'one_shot': r'\bone\s+shot\b',
+        'extra_attacks': r'\bextra\s+attacks\b',
+        'precision': r'\bprecision\b',
+    }
+    for key, pattern in bool_flags.items():
+        if re.search(pattern, text):
+            kw[key] = True
+    return kw
 
-
-@dataclass
-class UnitLoadout:
-    """Represents the complete loadout of a unit."""
-    unit_name: str
-    models: List[ModelEquipment]
-    total_points: int = 0
-    total_models: int = 0
-    
-    def clone(self) -> 'UnitLoadout':
-        return UnitLoadout(
-            unit_name=self.unit_name,
-            models=[m.clone() for m in self.models],
-            total_points=self.total_points,
-            total_models=self.total_models
-        )
-    
-    def get_model_counts(self) -> Dict[str, int]:
-        """Get count of each model type."""
-        counts = defaultdict(int)
-        for model in self.models:
-            counts[model.model_name] += 1
-        return dict(counts)
-    
-    def get_display_lines(self) -> List[str]:
-        """Get display lines for the loadout."""
-        lines = []
-        counts = self.get_model_counts()
-        
-        for model_name, count in counts.items():
-            # Get the first model of this type for equipment
-            model = next(m for m in self.models if m.model_name == model_name)
-            equip_str = model.get_display_string()
-            if equip_str:
-                lines.append(f"  {count}x {model_name}: {equip_str}")
-            else:
-                lines.append(f"  {count}x {model_name}")
-        
-        return lines
-
-
-@dataclass
-class EnhancedWargearOption:
-    """Enhanced wargear option with full selection logic."""
-    id: int
-    description: str
-    cleaned_description: str
-    button: str
-    line: int
-    
-    # Type classification
-    option_type: str  # 'replacement', 'addition', 'toggle', 'per_x_models'
-    
-    # Target
-    target_weapon: Optional[str] = None
-    target_model: Optional[str] = None  # e.g., "Aspiring Champion"
-    
-    # Choices
-    choices: List[str] = field(default_factory=list)
-    
-    # Limits
-    max_per_unit: Optional[int] = None  # e.g., 1 for "one model"
-    max_per_x_models: Optional[int] = None  # e.g., 5 for "per 5 models"
-    unlimited: bool = False  # "any number of models"
-    
-    # Selection state
-    enabled: bool = False
-    selected_count: int = 0
-    selected_choice: Optional[str] = None
-    
-    # Model tracking
-    applied_to_models: List[int] = field(default_factory=list)  # indices of models
-    
-    def get_max_allowed(self, unit_size: int) -> int:
-        """Get the maximum number of models this option can be applied to."""
-        if self.max_per_unit is not None:
-            return self.max_per_unit
-        if self.max_per_x_models is not None and self.max_per_x_models > 0:
-            return unit_size // self.max_per_x_models
-        if self.unlimited:
-            return unit_size
-        return 1
-    
-    def get_min_required(self) -> int:
-        """Get minimum number of models this option requires."""
-        if self.max_per_x_models is not None and self.max_per_x_models > 0:
-            return self.max_per_x_models
-        return 0
-
-
-# ============================================================
-# 3. ENHANCED WARGEAR PARSER
-# ============================================================
-
-def parse_enhanced_options(options_df: pd.DataFrame, datasheet_id: str) -> List[EnhancedWargearOption]:
-    """Parse wargear options with full rule extraction."""
-    if options_df.empty:
-        return []
-    
-    opt_rows = options_df[options_df['datasheet_id'] == datasheet_id]
-    if opt_rows.empty:
-        return []
-    
-    parsed_options = []
-    option_id = 0
-    
-    for _, row in opt_rows.iterrows():
-        desc = row['description']
-        if pd.isna(desc) or desc == '':
-            continue
-        desc = desc.strip()
-        
-        if desc == 'None' or desc == '-':
-            continue
-        
-        button = row['button'] if pd.notna(row['button']) else '•'
-        line = int(row['line']) if pd.notna(row['line']) else 0
-        
-        desc_clean = clean_html(desc)
-        lower_desc = desc_clean.lower()
-        
-        # Determine option type
-        option_type = 'addition'
-        if 'replaced with' in lower_desc or 'replace' in lower_desc:
-            option_type = 'replacement'
-        elif 'equipped with' in lower_desc:
-            option_type = 'addition'
-        elif 'can be equipped with' in lower_desc:
-            option_type = 'addition'
-        
-        # Extract target weapon
-        target_weapon = None
-        if option_type == 'replacement':
-            match = re.search(r'(.+?)\s+can be replaced with\s+(.+)', desc_clean, re.IGNORECASE)
-            if not match:
-                match = re.search(r'(.+?)\s+replaced with\s+(.+)', desc_clean, re.IGNORECASE)
-            if match:
-                target_weapon = match.group(1).strip()
-                choices_text = match.group(2).strip()
-            else:
-                target_weapon = extract_weapon_name(desc_clean)
-                choices_text = desc_clean
-        else:
-            choices_text = desc_clean
-        
-        # Extract choices
-        choices = []
-        # Split by bullet points, commas, or "or"
-        choice_parts = re.split(r'[,;•]|\s+or\s+|\s+and\s+', choices_text)
-        for part in choice_parts:
-            part = part.strip()
-            if part and not part.startswith('For') and not part.startswith('Any'):
-                # Clean up HTML artifacts
-                part = re.sub(r'<[^>]+>', '', part)
-                part = part.strip()
-                if part and len(part) > 1:
-                    choices.append(part)
-        
-        # If no choices, use the whole description
-        if not choices and option_type != 'replacement':
-            choices = [desc_clean]
-        
-        # Determine limits
-        max_per_unit = None
-        max_per_x_models = None
-        unlimited = False
-        target_model = None
-        
-        # Check for "Aspiring Champion" or similar
-        if 'aspiring champion' in lower_desc:
-            target_model = 'Aspiring Champion'
-        
-        # Check for "For every X models"
-        every_match = re.search(r'for every (\d+) models?', lower_desc)
-        if every_match:
-            max_per_x_models = int(every_match.group(1))
-        
-        # Check for "Up to X models"
-        up_to_match = re.search(r'up to (\d+)', lower_desc)
-        if up_to_match:
-            max_per_unit = int(up_to_match.group(1))
-        
-        # Check for "Any number"
-        if 'any number' in lower_desc:
-            unlimited = True
-        
-        # Check for "1 model" or "one model"
-        if re.search(r'\b(1|one)\s+model\b', lower_desc):
-            if max_per_unit is None:
-                max_per_unit = 1
-        
-        # Check for "For every 5 models" with specific weapons
-        if max_per_x_models:
-            # This is a per-X-models option with weapon choices
-            pass
-        
-        parsed_options.append(EnhancedWargearOption(
-            id=option_id,
-            description=desc,
-            cleaned_description=desc_clean,
-            button=button,
-            line=line,
-            option_type=option_type,
-            target_weapon=target_weapon,
-            target_model=target_model,
-            choices=choices,
-            max_per_unit=max_per_unit,
-            max_per_x_models=max_per_x_models,
-            unlimited=unlimited
-        ))
-        option_id += 1
-    
-    return parsed_options
-
-
-# ============================================================
-# 4. DATA CLASSES (Original)
-# ============================================================
 
 @dataclass
 class ModelStats:
@@ -421,54 +186,24 @@ class ModelStats:
     toughness: int
     save: int
     invuln: Optional[int]
-    invuln_description: str
     wounds: int
     leadership: int
     oc: int
-    
+
     @classmethod
-    def from_row(cls, row: pd.Series):
-        name = row['name'] if pd.notna(row['name']) else ''
-        toughness = parse_stat_value(row['T'], default=4)
-        save = parse_save_value(row['Sv'], default=4)
-        
-        invuln_str = str(row['inv_sv']).strip() if pd.notna(row['inv_sv']) else ''
-        if invuln_str == '-' or invuln_str == '' or invuln_str == 'N/A':
-            invuln = None
-        else:
-            invuln = parse_save_value(invuln_str, default=6)
-            if invuln >= save:
-                invuln = None
-        
-        wounds = parse_stat_value(row['W'], default=1)
-        leadership = parse_save_value(row['Ld'], default=7)
-        oc = parse_stat_value(row['OC'], default=1)
-        
+    def from_row(cls, row: pd.Series) -> 'ModelStats':
+        inv = parse_save_value(row.get('inv_sv'), 99)
+        save = parse_save_value(row.get('Sv'), 7)
         return cls(
-            name=name,
-            movement=str(row['M']) if pd.notna(row['M']) else '6"',
-            toughness=toughness,
+            name=str(row.get('name', '') or ''),
+            movement=str(row.get('M', '') or ''),
+            toughness=parse_int(row.get('T'), 4),
             save=save,
-            invuln=invuln,
-            invuln_description=str(row['inv_sv_descr']) if pd.notna(row['inv_sv_descr']) else '',
-            wounds=wounds,
-            leadership=leadership,
-            oc=oc
+            invuln=inv if inv < 7 else None,
+            wounds=parse_int(row.get('W'), 1),
+            leadership=parse_save_value(row.get('Ld'), 7),
+            oc=parse_int(row.get('OC'), 1),
         )
-
-
-@dataclass
-class UnitData:
-    id: str
-    name: str
-    faction_id: str
-    faction_name: str
-    composition: List[dict]
-    models: List[ModelStats]
-    keywords: List[str]
-    abilities: List[dict]
-    options: List[EnhancedWargearOption]
-    weapons: List['Weapon']
 
 
 @dataclass
@@ -478,1746 +213,1505 @@ class Weapon:
     weapon_type: str
     range: str
     attacks_dice: Tuple[int, int, int]
-    bs_ws: Optional[int]
+    bs_ws: int
     strength: int
     ap: int
     damage_dice: Tuple[int, int, int]
     keywords: Dict[str, Any] = field(default_factory=dict)
-    
-    def __post_init__(self):
-        self.is_torrent = self.keywords.get('torrent', False)
-        self.is_blast = self.keywords.get('blast', False)
-        self.blast_x = self.keywords.get('blast_x', 0)
-        self.is_cleave = self.keywords.get('cleave', False)
-        self.cleave_x = self.keywords.get('cleave_x', 0)
-        self.is_twin_linked = self.keywords.get('twin_linked', False)
-        self.is_heavy = self.keywords.get('heavy', False)
-        self.is_assault = self.keywords.get('assault', False)
-        self.rapid_fire_value = self.keywords.get('rapid_fire', 0)
-        self.melta_value = self.keywords.get('melta', 0)
-        self.sustained_value = self.keywords.get('sustained_hits', 0)
-        self.is_devastating = self.keywords.get('devastating_wounds', False)
-        self.is_lethal = self.keywords.get('lethal_hits', False)
-        self.is_lance = self.keywords.get('lance', False)
-        self.ignores_cover = self.keywords.get('ignores_cover', False)
-        self.is_hazardous = self.keywords.get('hazardous', False)
-        self.is_psychic = self.keywords.get('psychic', False)
-        self.is_pistol = self.keywords.get('pistol', False)
-        self.is_precision = self.keywords.get('precision', False)
-        
-        self.anti_values = {}
+
+    @property
+    def is_melee(self) -> bool:
+        return self.weapon_type.lower() == 'melee' or self.range.lower() == 'melee'
+
+    def keyword_string(self) -> str:
+        parts: List[str] = []
+        if self.keywords.get('torrent'):
+            parts.append('Torrent')
+        if self.keywords.get('heavy'):
+            parts.append('Heavy')
+        if self.keywords.get('twin_linked'):
+            parts.append('Twin-linked')
+        if self.keywords.get('rapid_fire', 0):
+            parts.append(f"Rapid Fire {self.keywords['rapid_fire']}")
+        if self.keywords.get('blast'):
+            parts.append(f"Blast {self.keywords.get('blast_x', 1)}")
+        if self.keywords.get('cleave'):
+            parts.append(f"Cleave {self.keywords.get('cleave_x', 1)}")
+        if self.keywords.get('sustained_hits', 0):
+            parts.append(f"Sustained Hits {self.keywords['sustained_hits']}")
+        for flag, label in (
+            ('lethal_hits', 'Lethal Hits'),
+            ('devastating_wounds', 'Devastating Wounds'),
+            ('lance', 'Lance'),
+            ('ignores_cover', 'Ignores Cover'),
+            ('pistol', 'Pistol'),
+            ('hazardous', 'Hazardous'),
+            ('extra_attacks', 'Extra Attacks'),
+            ('precision', 'Precision'),
+        ):
+            if self.keywords.get(flag):
+                parts.append(label)
         for key, value in self.keywords.items():
             if key.startswith('anti_'):
-                self.anti_values[key.replace('anti_', '')] = value
-    
-    def get_average_attacks(self, unit_size: int = 0, half_range: bool = False) -> float:
-        num_dice, sides, mod = self.attacks_dice
-        if num_dice == 0 or sides == 0:
-            base = mod
-        else:
-            base = num_dice * (sides + 1) / 2 + mod
-        
-        if self.is_blast and self.blast_x > 0 and unit_size > 5:
-            base += self.blast_x * (unit_size - 5)
-        
-        if self.is_cleave and self.cleave_x > 0 and unit_size > 5:
-            base += self.cleave_x * (unit_size - 5)
-        
-        if self.rapid_fire_value > 0 and half_range:
-            base += self.rapid_fire_value
-        
-        return max(0, base)
-    
-    def get_average_damage(self, half_range: bool = False) -> float:
-        num_dice, sides, mod = self.damage_dice
-        if num_dice == 0 or sides == 0:
-            damage = mod
-        else:
-            damage = num_dice * (sides + 1) / 2 + mod
-        
-        if self.melta_value > 0 and half_range:
-            damage += self.melta_value
-        
-        return max(0, damage)
-    
-    def get_strength(self, target_keywords: List[str] = None) -> int:
-        if target_keywords and self.anti_values:
-            for keyword in target_keywords:
-                keyword_lower = keyword.lower()
-                if keyword_lower in self.anti_values:
-                    return self.anti_values[keyword_lower]
-        return self.strength
-    
-    def get_keyword_string(self) -> str:
-        parts = []
-        if self.is_torrent:
-            parts.append("Torrent")
-        if self.is_blast:
-            parts.append(f"Blast({self.blast_x})" if self.blast_x else "Blast")
-        if self.is_cleave:
-            parts.append(f"Cleave({self.cleave_x})" if self.cleave_x else "Cleave")
-        if self.is_twin_linked:
-            parts.append("Twin-linked")
-        if self.is_heavy:
-            parts.append("Heavy")
-        if self.is_assault:
-            parts.append("Assault")
-        if self.rapid_fire_value > 0:
-            parts.append(f"Rapid Fire {self.rapid_fire_value}")
-        if self.melta_value > 0:
-            parts.append(f"Melta {self.melta_value}")
-        if self.sustained_value > 0:
-            parts.append(f"Sustained Hits {self.sustained_value}")
-        if self.is_devastating:
-            parts.append("Devastating Wounds")
-        if self.is_lethal:
-            parts.append("Lethal Hits")
-        if self.is_lance:
-            parts.append("Lance")
-        if self.ignores_cover:
-            parts.append("Ignores Cover")
-        if self.is_hazardous:
-            parts.append("Hazardous")
-        if self.is_psychic:
-            parts.append("Psychic")
-        if self.is_pistol:
-            parts.append("Pistol")
-        if self.is_precision:
-            parts.append("Precision")
-        
-        for key, value in self.anti_values.items():
-            parts.append(f"Anti-{key.capitalize()} {value}+")
-        
-        return ", ".join(parts) if parts else "None"
+                parts.append(f"Anti-{key[5:].replace('_', ' ').title()} {value}+")
+        return ', '.join(parts) if parts else 'None'
+
+    def attack_distribution(self, target_size: int, half_range: bool) -> Dict[int, float]:
+        extra = 0
+        if half_range:
+            extra += int(self.keywords.get('rapid_fire', 0))
+        if self.keywords.get('blast'):
+            extra += int(self.keywords.get('blast_x', 1)) * max(0, target_size // 5)
+        if self.keywords.get('cleave'):
+            extra += int(self.keywords.get('cleave_x', 1)) * max(0, target_size // 5)
+        return dice_distribution(self.attacks_dice, extra)
+
+    def damage_distribution(self, half_range: bool) -> Dict[int, float]:
+        extra = int(self.keywords.get('melta', 0)) if half_range else 0
+        return dice_distribution(self.damage_dice, extra)
+
+
+@dataclass
+class ModelEquipment:
+    model_name: str
+    weapons: List[str] = field(default_factory=list)
+    wargear: List[str] = field(default_factory=list)
+
+    def clone(self) -> 'ModelEquipment':
+        return ModelEquipment(self.model_name, self.weapons.copy(), self.wargear.copy())
+
+
+@dataclass
+class UnitLoadout:
+    unit_name: str
+    models: List[ModelEquipment] = field(default_factory=list)
+
+    @property
+    def total_models(self) -> int:
+        return len(self.models)
+
+    def weapon_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = defaultdict(int)
+        for model in self.models:
+            for weapon in model.weapons:
+                counts[weapon] += 1
+        return dict(counts)
+
+    def display_lines(self) -> List[str]:
+        grouped: Dict[Tuple[str, Tuple[str, ...], Tuple[str, ...]], int] = defaultdict(int)
+        for model in self.models:
+            key = (model.model_name, tuple(sorted(model.weapons)), tuple(sorted(model.wargear)))
+            grouped[key] += 1
+        lines: List[str] = []
+        for (model_name, weapons, wargear), count in grouped.items():
+            equipment = list(weapons) + list(wargear)
+            suffix = ': ' + ', '.join(equipment) if equipment else ''
+            lines.append(f"{count}x {model_name}{suffix}")
+        return lines
+
+
+@dataclass
+class WargearOption:
+    id: int
+    description: str
+    option_type: str
+    target_weapon: Optional[str]
+    choices: List[str]
+    choice_bundles: Dict[str, List[str]] = field(default_factory=dict)
+    target_model_hint: Optional[str] = None
+    max_per_unit: Optional[int] = None
+    per_x_models: Optional[int] = None
+    unlimited: bool = False
+    enabled: bool = False
+    selected_count: int = 0
+    selected_choice: Optional[str] = None
+
+    def max_allowed(self, unit_size: int) -> int:
+        if self.unlimited:
+            return max(1, unit_size)
+        if self.per_x_models:
+            return max(0, unit_size // self.per_x_models)
+        if self.max_per_unit is not None:
+            return max(1, self.max_per_unit)
+        return 1
+
+
+@dataclass
+class UnitData:
+    id: str
+    name: str
+    faction_id: str
+    faction_name: str
+    loadout_text: str
+    composition: List[dict]
+    models: List[ModelStats]
+    keywords: List[str]
+    abilities: List[dict]
+    weapons: List[Weapon]
+    options: List[WargearOption]
+
+
+@dataclass
+class AttackResult:
+    weapon_name: str
+    weapon_count: int
+    defender_model: str
+    defender_count: int
+    avg_attacks: float
+    hit_probability: float
+    critical_hit_probability: float
+    avg_hits: float
+    wound_probability: float
+    critical_wound_probability: float
+    avg_wounds: float
+    regular_failed_saves: float
+    devastating_wounds: float
+    avg_damage: float
+    expected_kills: float
+    kill_probability: float
+    expected_remaining_wounds_on_current: float
+    effective_damage_distribution: Dict[int, float]
 
 
 # ============================================================
-# 5. DATA LOADING (Original with enhanced options)
+# 3. DATA LOADING
 # ============================================================
 
 FACTION_NAMES = {
-    'AC': 'Adeptus Custodes',
-    'AdM': 'Adeptus Mechanicus',
-    'AE': 'Aeldari',
-    'AM': 'Astra Militarum',
-    'AoI': 'Agents of the Imperium',
-    'AS': 'Adepta Sororitas',
-    'CD': 'Chaos Daemons',
-    'CSM': 'Chaos Space Marines',
-    'DG': 'Death Guard',
-    'DRU': 'Drukhari',
-    'EC': 'Emperor\'s Children',
-    'GC': 'Genestealer Cults',
-    'GK': 'Grey Knights',
-    'LoV': 'Leagues of Votann',
-    'NEC': 'Necrons',
-    'ORK': 'Orks',
-    'QI': 'Questoris Imperialis',
-    'QT': 'Chaos Knights',
-    'SM': 'Space Marines',
-    'TAU': 'T\'au Empire',
-    'TL': 'Titan Legions',
-    'TS': 'Thousand Sons',
-    'TYR': 'Tyranids',
+    'AC': 'Adeptus Custodes', 'AdM': 'Adeptus Mechanicus', 'AE': 'Aeldari',
+    'AM': 'Astra Militarum', 'AoI': 'Agents of the Imperium',
+    'AS': 'Adepta Sororitas', 'CD': 'Chaos Daemons', 'CSM': 'Chaos Space Marines',
+    'DG': 'Death Guard', 'DRU': 'Drukhari', 'EC': "Emperor's Children",
+    'GC': 'Genestealer Cults', 'GK': 'Grey Knights', 'LoV': 'Leagues of Votann',
+    'NEC': 'Necrons', 'ORK': 'Orks', 'QI': 'Questoris Imperialis',
+    'QT': 'Chaos Knights', 'SM': 'Space Marines', 'TAU': "T'au Empire",
+    'TL': 'Titan Legions', 'TS': 'Thousand Sons', 'TYR': 'Tyranids',
     'WE': 'World Eaters',
 }
 
 UNIT_KEYWORDS = [
     'Infantry', 'Vehicle', 'Monster', 'Walker', 'Flyer', 'Beast', 'Swarm',
-    'Cavalry', 'Mounted', 'Dreadnought', 'Terminator', 'Jump Pack',
-    'Battlesuit', 'Titanic', 'Character', 'Epic Hero', 'Battleline',
-    'Psyker', 'Grenades', 'Smoke', 'Transport', 'Dedicated Transport',
-    'Fortification', 'Fly', 'Aircraft', 'Towering', 'Mobile'
+    'Cavalry', 'Mounted', 'Dreadnought', 'Terminator', 'Jump Pack', 'Battlesuit',
+    'Titanic', 'Character', 'Epic Hero', 'Battleline', 'Psyker', 'Grenades',
+    'Smoke', 'Transport', 'Dedicated Transport', 'Fortification', 'Fly', 'Aircraft',
+    'Towering', 'Mobile',
 ]
 
 
-def load_all_data(base_path: str = '.'):
-    """Load all CSV files."""
-    files = {
+def load_all_data(base_path: str = '.') -> Dict[str, pd.DataFrame]:
+    filenames = {
         'units': 'Datasheets.csv',
         'wargear': 'Datasheets_wargear.csv',
         'composition': 'Datasheets_unit_composition.csv',
         'models': 'Datasheets_models.csv',
         'options': 'Datasheets_options.csv',
         'keywords': 'Datasheets_keywords.csv',
-        'abilities': 'Datasheets_abilities.csv'
+        'abilities': 'Datasheets_abilities.csv',
     }
-    
-    data = {}
-    for name, filename in files.items():
+    data: Dict[str, pd.DataFrame] = {}
+    for key, filename in filenames.items():
         path = os.path.join(base_path, filename)
         if not os.path.exists(path):
-            print(f"Warning: {filename} not found at {path}")
-            data[name] = pd.DataFrame()
-        else:
-            try:
-                df = pd.read_csv(path, sep='|', dtype=str)
-                df.columns = df.columns.str.strip()
-                data[name] = df
-            except Exception as e:
-                print(f"Error loading {filename}: {e}")
-                data[name] = pd.DataFrame()
-    
-    if not data['wargear'].empty:
-        data['wargear'] = data['wargear'].dropna(subset=['datasheet_id'])
-        data['wargear'] = data['wargear'][data['wargear']['name'].notna() & (data['wargear']['name'] != '')]
-        data['wargear'] = data['wargear'][data['wargear']['name'] != 'Example Wargear']
-    
+            data[key] = pd.DataFrame()
+            continue
+        df = pd.read_csv(path, sep='|', dtype=str)
+        df.columns = df.columns.str.strip().str.replace('\ufeff', '', regex=False)
+        data[key] = df
     return data
 
 
-def parse_composition(comp_df: pd.DataFrame, datasheet_id: str) -> List[dict]:
-    """Parse unit composition."""
-    if comp_df.empty:
+def parse_composition(df: pd.DataFrame, datasheet_id: str) -> List[dict]:
+    if df.empty or 'datasheet_id' not in df.columns:
         return []
-    comp_rows = comp_df[comp_df['datasheet_id'] == datasheet_id]
-    if comp_rows.empty:
-        return []
-    
-    models = []
-    for _, row in comp_rows.iterrows():
-        desc = row['description']
-        if pd.isna(desc) or desc == '':
+    rows = df[df['datasheet_id'] == datasheet_id]
+    out: List[dict] = []
+    for _, row in rows.iterrows():
+        text = clean_html(row.get('description'))
+        if not text or text.upper().startswith('OR'):
             continue
-        desc = desc.strip()
-        
-        if desc == 'OR' or desc.startswith('OR'):
-            continue
-        
-        desc_clean = re.sub(r'<[^>]+>', '', desc)
-        
-        range_pattern = r'^(\d+)-(\d+)\s+(.+)$'
-        match = re.match(range_pattern, desc_clean)
+        match = re.match(r'^(\d+)\s*[-–]\s*(\d+)\s+(.+)$', text)
         if match:
-            models.append({
-                'name': match.group(3).strip(),
-                'min': int(match.group(1)),
-                'max': int(match.group(2))
-            })
+            out.append({'name': match.group(3).strip(), 'min': int(match.group(1)), 'max': int(match.group(2))})
             continue
-        
-        single_pattern = r'^(\d+)\s+(.+)$'
-        match = re.match(single_pattern, desc_clean)
+        match = re.match(r'^(\d+)\s+(.+)$', text)
         if match:
-            models.append({
-                'name': match.group(2).strip(),
-                'min': int(match.group(1)),
-                'max': int(match.group(1))
-            })
+            n = int(match.group(1))
+            out.append({'name': match.group(2).strip(), 'min': n, 'max': n})
             continue
-        
-        optional_pattern = r'^0-(\d+)\s+(.+)$'
-        match = re.match(optional_pattern, desc_clean)
-        if match:
-            models.append({
-                'name': match.group(2).strip(),
-                'min': 0,
-                'max': int(match.group(1))
-            })
-            continue
-        
-        models.append({'name': desc_clean, 'min': 1, 'max': 1})
-    
-    return models
+        out.append({'name': text, 'min': 1, 'max': 1})
+    return out
 
 
-def get_model_stats(models_df: pd.DataFrame, datasheet_id: str, model_name: str) -> Optional[ModelStats]:
-    """Get stats for a model with flexible matching."""
-    if models_df.empty:
-        return None
-    
-    model_name_clean = model_name.strip().upper()
-    datasheet_models = models_df[models_df['datasheet_id'] == datasheet_id]
-    if datasheet_models.empty:
-        return None
-    
-    matching = datasheet_models[datasheet_models['name'].str.upper() == model_name_clean]
-    if not matching.empty:
-        return ModelStats.from_row(matching.iloc[0])
-    
-    matching = datasheet_models[datasheet_models['name'].str.upper().str.contains(model_name_clean)]
-    if not matching.empty:
-        return ModelStats.from_row(matching.iloc[0])
-    
-    for _, row in datasheet_models.iterrows():
-        db_name = str(row['name']).upper()
-        if model_name_clean in db_name:
-            return ModelStats.from_row(row)
-    
-    if not datasheet_models.empty:
-        return ModelStats.from_row(datasheet_models.iloc[0])
-    
-    return None
-
-
-def get_unit_keywords(keywords_df: pd.DataFrame, datasheet_id: str) -> List[str]:
-    if keywords_df.empty:
+def get_models(df: pd.DataFrame, datasheet_id: str) -> List[ModelStats]:
+    if df.empty or 'datasheet_id' not in df.columns:
         return []
-    kw_rows = keywords_df[keywords_df['datasheet_id'] == datasheet_id]
-    if kw_rows.empty:
-        return []
-    keywords = set()
-    for _, row in kw_rows.iterrows():
-        keyword = row['keyword']
-        if pd.notna(keyword) and keyword != '':
-            keywords.add(keyword)
-    return sorted(list(keywords))
+    rows = df[df['datasheet_id'] == datasheet_id]
+    return [ModelStats.from_row(row) for _, row in rows.iterrows()]
 
 
-def get_unit_abilities(abilities_df: pd.DataFrame, datasheet_id: str) -> List[dict]:
-    if abilities_df.empty:
+def get_keywords(df: pd.DataFrame, datasheet_id: str) -> List[str]:
+    if df.empty or 'datasheet_id' not in df.columns:
         return []
-    ab_rows = abilities_df[abilities_df['datasheet_id'] == datasheet_id]
-    if ab_rows.empty:
+    rows = df[df['datasheet_id'] == datasheet_id]
+    values = []
+    for _, row in rows.iterrows():
+        value = clean_html(row.get('keyword'))
+        if value:
+            values.append(value)
+    return sorted(set(values))
+
+
+def get_abilities(df: pd.DataFrame, datasheet_id: str) -> List[dict]:
+    if df.empty or 'datasheet_id' not in df.columns:
         return []
-    abilities = []
-    for _, row in ab_rows.iterrows():
-        if pd.notna(row['name']) and row['name'] != '':
-            abilities.append({
-                'name': row['name'],
-                'description': row['description'] if pd.notna(row['description']) else '',
-                'model': row['model'] if pd.notna(row['model']) else '',
-                'type': row['type'] if pd.notna(row['type']) else 'Datasheet'
-            })
-    return abilities
+    rows = df[df['datasheet_id'] == datasheet_id]
+    out = []
+    for _, row in rows.iterrows():
+        name = clean_html(row.get('name'))
+        if name:
+            out.append({'name': name, 'description': clean_html(row.get('description'))})
+    return out
 
 
 def parse_weapon(row: pd.Series) -> Weapon:
-    """Parse a weapon from a wargear row."""
-    bs_ws = None
-    if pd.notna(row['BS_WS']) and row['BS_WS'] != 'N/A' and row['BS_WS'] != '-':
-        try:
-            bs_ws = int(str(row['BS_WS']).replace('+', ''))
-        except ValueError:
-            bs_ws = None
-    
     return Weapon(
-        datasheet_id=row['datasheet_id'],
-        name=row['name'],
-        weapon_type=row['type'] if pd.notna(row['type']) else 'Ranged',
-        range=row['range'] if pd.notna(row['range']) else 'Melee',
-        attacks_dice=parse_dice(row['A']),
-        bs_ws=bs_ws,
-        strength=parse_stat_value(row['S'], default=4),
-        ap=parse_stat_value(row['AP'], default=0),
-        damage_dice=parse_dice(row['D']),
-        keywords=parse_keywords(row['description'])
+        datasheet_id=str(row.get('datasheet_id', '')),
+        name=clean_html(row.get('name')),
+        weapon_type=clean_html(row.get('type')) or 'Ranged',
+        range=clean_html(row.get('range')) or 'Melee',
+        attacks_dice=parse_dice(row.get('A')),
+        bs_ws=parse_save_value(row.get('BS_WS'), 4),
+        strength=parse_int(row.get('S'), 4),
+        ap=parse_int(row.get('AP'), 0),
+        damage_dice=parse_dice(row.get('D')),
+        keywords=parse_keywords(row.get('description')),
     )
 
 
-def get_unit_weapons(data: Dict, datasheet_id: str) -> List[Weapon]:
-    """Get all weapons for a datasheet."""
-    wargear_df = data['wargear']
-    wargear_rows = wargear_df[wargear_df['datasheet_id'] == datasheet_id]
-    
+def get_weapons(df: pd.DataFrame, datasheet_id: str) -> List[Weapon]:
+    if df.empty or 'datasheet_id' not in df.columns:
+        return []
+    rows = df[df['datasheet_id'] == datasheet_id]
     weapons = []
-    for _, row in wargear_rows.iterrows():
-        name = row['name']
-        if pd.isna(name) or name == '':
+    for _, row in rows.iterrows():
+        name = clean_html(row.get('name'))
+        if not name:
             continue
-        try:
-            weapon = parse_weapon(row)
-            if weapon.attacks_dice[0] > 0 or weapon.attacks_dice[2] > 0:
-                weapons.append(weapon)
-        except Exception as e:
-            continue
+        weapon = parse_weapon(row)
+        if weapon.attacks_dice != (0, 0, 0):
+            weapons.append(weapon)
     return weapons
 
 
-def get_unit_data(data: Dict, datasheet_id: str) -> Optional[UnitData]:
-    """Get complete unit data for a datasheet."""
-    units_df = data['units']
-    unit_rows = units_df[units_df['id'] == datasheet_id]
-    if unit_rows.empty:
-        return None
-    
-    row = unit_rows.iloc[0]
-    name = row['name'] if pd.notna(row['name']) else ''
-    faction_id = row['faction_id'] if pd.notna(row['faction_id']) else ''
-    faction_name = FACTION_NAMES.get(faction_id, faction_id)
-    
-    composition = parse_composition(data['composition'], datasheet_id)
-    
-    models = []
-    if composition:
-        for comp in composition:
-            stats = get_model_stats(data['models'], datasheet_id, comp['name'])
-            if stats:
-                models.append(stats)
-    
-    if not models:
-        all_models = data['models'][data['models']['datasheet_id'] == datasheet_id]
-        if not all_models.empty:
-            for _, row2 in all_models.iterrows():
-                stats = ModelStats.from_row(row2)
-                if stats:
-                    models.append(stats)
-                    break
-    
-    if not models:
-        stats = get_model_stats(data['models'], datasheet_id, name)
-        if stats:
-            models.append(stats)
-    
-    keywords = get_unit_keywords(data['keywords'], datasheet_id)
-    abilities = get_unit_abilities(data['abilities'], datasheet_id)
-    options = parse_enhanced_options(data['options'], datasheet_id)
-    weapons = get_unit_weapons(data, datasheet_id)
-    
-    return UnitData(
-        id=datasheet_id,
-        name=name,
-        faction_id=faction_id,
-        faction_name=faction_name,
-        composition=composition,
-        models=models,
-        keywords=keywords,
-        abilities=abilities,
-        options=options,
-        weapons=weapons
-    )
+def match_known_weapon(text: str, weapon_names: List[str]) -> Optional[str]:
+    cleaned = canonical_equipment_name(text).lower()
+    candidates = sorted(weapon_names, key=len, reverse=True)
+    for name in candidates:
+        n = name.lower()
+        if cleaned == n:
+            return name
+    for name in candidates:
+        n = name.lower()
+        if re.search(rf'(?<![a-z0-9]){re.escape(n)}(?![a-z0-9])', cleaned):
+            return name
+    return None
 
 
-# ============================================================
-# 6. PROBABILITY CALCULATIONS (Original)
-# ============================================================
-
-def calculate_hit_probability(bs: int, is_torrent: bool = False, is_heavy: bool = False,
-                              moved_more_than_3: bool = False, cover: bool = False,
-                              is_psychic: bool = False, reroll_ones: bool = False,
-                              reroll_all: bool = False, sustained_hits: int = 0) -> Tuple[float, float]:
-    if is_torrent:
-        return 1.0, 1.0
-    
-    hit_on = bs
-    if is_heavy and moved_more_than_3:
-        hit_on += 1
-    if cover and not is_psychic:
-        hit_on += 1
-    if is_psychic:
-        hit_on = bs
-    
-    if hit_on < 2:
-        hit_prob = 1.0
-    elif hit_on > 6:
-        hit_prob = 0.0
-    else:
-        hit_prob = (7 - hit_on) / 6
-    
-    fail_prob = 1 - hit_prob
-    if reroll_all:
-        hit_prob = hit_prob + fail_prob * hit_prob
-    elif reroll_ones:
-        if hit_on > 2:
-            ones_prob = 1/6
-            hit_prob = hit_prob + ones_prob * hit_prob
-    
-    if sustained_hits > 0:
-        crit_prob = 1/6
-        avg_extra_per_attack = crit_prob * sustained_hits
-        return hit_prob, hit_prob + avg_extra_per_attack
-    
-    return hit_prob, hit_prob
-
-
-def calculate_wound_probability(strength: int, toughness: int, 
-                                anti_values: Dict[str, int] = None,
-                                target_keywords: List[str] = None,
-                                is_lance: bool = False, charging: bool = False,
-                                reroll_ones: bool = False, reroll_all: bool = False,
-                                lethal_hits: bool = False) -> float:
-    if target_keywords and anti_values:
-        for keyword in target_keywords:
-            keyword_lower = keyword.lower()
-            if keyword_lower in anti_values:
-                anti_on = anti_values[keyword_lower]
-                if anti_on <= 6:
-                    return (7 - anti_on) / 6
-    
-    if strength >= toughness * 2:
-        wound_on = 2
-    elif strength > toughness:
-        wound_on = 3
-    elif strength == toughness:
-        wound_on = 4
-    elif strength * 2 <= toughness:
-        wound_on = 6
-    elif strength < toughness:
-        wound_on = 5
-    else:
-        wound_on = 6
-    
-    if is_lance and charging:
-        wound_on = max(2, wound_on - 1)
-    
-    if wound_on < 2:
-        wound_prob = 1.0
-    elif wound_on > 6:
-        wound_prob = 0.0
-    else:
-        wound_prob = (7 - wound_on) / 6
-    
-    fail_prob = 1 - wound_prob
-    if reroll_all:
-        wound_prob = wound_prob + fail_prob * wound_prob
-    elif reroll_ones:
-        if wound_on > 2:
-            ones_prob = 1/6
-            wound_prob = wound_prob + ones_prob * wound_prob
-    
-    if lethal_hits:
-        wound_prob = wound_prob + (1/6) * (1 - wound_prob)
-    
-    return wound_prob
-
-
-def calculate_save_probability(save: int, ap: int, invuln: Optional[int] = None,
-                               is_devastating: bool = False) -> float:
-    if is_devastating:
-        return 1.0
-    
-    if invuln is not None and invuln < save:
-        save_needed = invuln
-    else:
-        save_needed = save
-    
-    effective_save = save_needed + ap
-    if effective_save < 2:
-        return 1.0
-    if effective_save > 6:
-        return 0.0
-    return (effective_save - 1) / 6
-
-
-def get_damage_distribution(weapon: Weapon, half_range: bool = False) -> List[Tuple[int, float]]:
-    num_dice, sides, mod = weapon.damage_dice
-    
-    if num_dice == 0 or sides == 0:
-        damage = mod
-        if weapon.melta_value > 0 and half_range:
-            damage += weapon.melta_value
-        return [(max(0, damage), 1.0)]
-    
-    dist = {0: 1.0}
-    for _ in range(num_dice):
-        new_dist = {}
-        for val, prob in dist.items():
-            for i in range(1, sides + 1):
-                new_dist[val + i] = new_dist.get(val + i, 0) + prob / sides
-        dist = new_dist
-    
-    result = []
-    for val, prob in dist.items():
-        damage = val + mod
-        if weapon.melta_value > 0 and half_range:
-            damage += weapon.melta_value
-        damage = max(0, damage)
-        result.append((damage, prob))
-    
+def find_known_weapons(text: str, weapon_names: List[str]) -> List[str]:
+    low = clean_html(text).lower()
+    found: List[Tuple[int, int, str]] = []
+    for name in weapon_names:
+        match = re.search(rf'(?<![a-z0-9]){re.escape(name.lower())}(?![a-z0-9])', low)
+        if match:
+            found.append((match.start(), -len(name), name))
+    found.sort()
+    result: List[str] = []
+    for _, _, name in found:
+        if name not in result:
+            result.append(name)
     return result
 
 
-@dataclass
-class AttackResult:
-    weapon_name: str
-    attacker_count: int
-    attacker_model: str
-    defender_model: str
-    defender_count: int
-    
-    hit_prob: float
-    avg_hits_per_attack: float
-    wound_prob: float
-    save_fail_prob: float
-    
-    avg_attacks: float
-    avg_hits: float
-    avg_wounds: float
-    avg_failed_saves: float
-    avg_damage_per_failed_save: float
-    avg_total_damage: float
-    
-    expected_kills: float
-    expected_wounds_remaining: float
-    kill_probability: float
-    damage_distribution: Dict[int, float]
-
-
-def calculate_attack(weapon: Weapon,
-                     attacker_stats: ModelStats,
-                     attacker_count: int,
-                     defender_stats: ModelStats,
-                     defender_count: int,
-                     defender_keywords: List[str],
-                     half_range: bool = False,
-                     cover: bool = False,
-                     charging: bool = False,
-                     moved_more_than_3: bool = False,
-                     reroll_hit_ones: bool = False,
-                     reroll_hit_all: bool = False,
-                     reroll_wound_ones: bool = False,
-                     reroll_wound_all: bool = False,
-                     sustained_hits: int = 0,
-                     lethal_hits: bool = False) -> AttackResult:
-    
-    bs = weapon.bs_ws if weapon.bs_ws else 4
-    
-    hit_prob, avg_hits_per_attack = calculate_hit_probability(
-        bs=bs,
-        is_torrent=weapon.is_torrent,
-        is_heavy=weapon.is_heavy,
-        moved_more_than_3=moved_more_than_3,
-        cover=cover,
-        is_psychic=weapon.is_psychic,
-        reroll_ones=reroll_hit_ones,
-        reroll_all=reroll_hit_all,
-        sustained_hits=sustained_hits if not weapon.is_torrent else 0
-    )
-    
-    strength = weapon.get_strength(defender_keywords)
-    wound_prob = calculate_wound_probability(
-        strength=strength,
-        toughness=defender_stats.toughness,
-        anti_values=weapon.anti_values,
-        target_keywords=defender_keywords,
-        is_lance=weapon.is_lance,
-        charging=charging,
-        reroll_ones=reroll_wound_ones,
-        reroll_all=reroll_wound_all,
-        lethal_hits=lethal_hits
-    )
-    
-    save_fail_prob = calculate_save_probability(
-        save=defender_stats.save,
-        ap=weapon.ap,
-        invuln=defender_stats.invuln,
-        is_devastating=weapon.is_devastating
-    )
-    
-    avg_attacks = weapon.get_average_attacks(defender_count, half_range) * attacker_count
-    avg_hits = avg_attacks * avg_hits_per_attack
-    avg_wounds = avg_hits * wound_prob
-    avg_failed_saves = avg_wounds * save_fail_prob
-    
-    damage_dist = get_damage_distribution(weapon, half_range)
-    avg_damage_per_failed_save = sum(d * p for d, p in damage_dist)
-    avg_total_damage = avg_failed_saves * avg_damage_per_failed_save
-    
-    wounds_per_model = defender_stats.wounds
-    expected_kills = avg_total_damage / wounds_per_model
-    expected_kills = min(expected_kills, defender_count)
-    expected_wounds_remaining = avg_total_damage % wounds_per_model
-    
-    if avg_total_damage > 0:
-        kill_prob = 1 - math.exp(-avg_total_damage / wounds_per_model)
-        kill_prob = min(kill_prob, 0.95)
+def _choice_bundles(choice_text: str, weapon_names: List[str]) -> Dict[str, List[str]]:
+    text = clean_html(choice_text).strip(' .:')
+    # Wahapedia exports bullet alternatives with a bullet/marker. If bullets are not
+    # present, a plain "or" is also treated as an alternative separator.
+    if '·' in text:
+        parts = [p.strip() for p in text.split('·') if p.strip()]
+    elif re.search(r'\s+or\s+', text, re.IGNORECASE):
+        parts = [p.strip() for p in re.split(r'\s+or\s+', text, flags=re.IGNORECASE) if p.strip()]
     else:
-        kill_prob = 0
-    
-    damage_distribution = {}
-    if avg_total_damage > 0:
-        max_dmg = int(avg_total_damage * 2.5) + 5
-        for d in range(max_dmg + 1):
-            prob = math.exp(-avg_total_damage) * (avg_total_damage ** d) / math.factorial(d)
-            if prob > 0.0001:
-                damage_distribution[d] = prob
-    
+        parts = [text]
+
+    bundles: Dict[str, List[str]] = {}
+    for part in parts:
+        found = find_known_weapons(part, weapon_names)
+        if not found:
+            continue
+        label = ' + '.join(found)
+        bundles[label] = found
+    return bundles
+
+
+def _model_hint_from_target_phrase(target_phrase: str, target_weapon: Optional[str]) -> Optional[str]:
+    if not target_weapon:
+        return None
+    hint = clean_html(target_phrase)
+    hint = re.sub(re.escape(target_weapon), ' ', hint, flags=re.IGNORECASE)
+    hint = re.sub(r'^for every\s+\d+\s+models?\s+in\s+this\s+unit,?\s*\d*\s*', ' ', hint, flags=re.IGNORECASE)
+    hint = re.sub(r'^up to\s+\d+\s+models?,?\s*', ' ', hint, flags=re.IGNORECASE)
+    hint = re.sub(r'^\d+\s+', ' ', hint)
+    hint = re.sub(r"[’']s\b", '', hint)
+    hint = re.sub(r'\b(the|their|his|her|its|a|an|one|any|up to|model|models|each|can|have|has|in|this|unit)\b', ' ', hint, flags=re.IGNORECASE)
+    hint = re.sub(r'\s+', ' ', hint).strip(' ,;:-')
+    return hint or None
+
+
+def _model_hint_from_add_subject(subject: str) -> Optional[str]:
+    hint = clean_html(subject)
+    hint = re.sub(r"[’']s\b", '', hint)
+    hint = re.sub(r'\b(the|this|one|a|an|model|models|each|can|may)\b', ' ', hint, flags=re.IGNORECASE)
+    hint = re.sub(r'\s+', ' ', hint).strip(' ,;:-')
+    # Generic wording is not a useful model constraint.
+    if not hint or hint.lower() in {'any number of', 'up to'}:
+        return None
+    if 'number of' in hint.lower():
+        return None
+    return hint
+
+
+def parse_wargear_options(df: pd.DataFrame, datasheet_id: str, weapon_names: List[str]) -> List[WargearOption]:
+    if df.empty or 'datasheet_id' not in df.columns:
+        return []
+    rows = df[df['datasheet_id'] == datasheet_id]
+    result: List[WargearOption] = []
+
+    for idx, (_, row) in enumerate(rows.iterrows()):
+        desc = clean_html(row.get('description'))
+        if not desc or desc.lower() in ('none', '-', 'or'):
+            continue
+        low = desc.lower()
+
+        max_per_unit: Optional[int] = None
+        per_x: Optional[int] = None
+        unlimited = 'any number of models' in low or 'any number of model' in low
+
+        match = re.search(r'for every\s+(\d+)\s+models?', low)
+        if match:
+            per_x = int(match.group(1))
+        match = re.search(r'up to\s+(\d+)\s+models?', low)
+        if match:
+            max_per_unit = int(match.group(1))
+        if max_per_unit is None:
+            match = re.search(r'\b(\d+)\s+models?\b', low)
+            if match and not per_x:
+                max_per_unit = int(match.group(1))
+        if max_per_unit is None and re.search(r'\bone model\b', low):
+            max_per_unit = 1
+
+        option_type = 'addition'
+        target_weapon: Optional[str] = None
+        target_model_hint: Optional[str] = None
+        choice_text = desc
+
+        rep = re.search(r'(?:have|has)\s+(?:their|its|his|her)\s+(.+?)\s+replaced\s+with\s+(.+)$', desc, re.IGNORECASE)
+        if not rep:
+            rep = re.search(r'(.+?)\s+can\s+(?:each\s+)?be\s+replaced\s+with\s+(.+)$', desc, re.IGNORECASE)
+        if rep:
+            option_type = 'replacement'
+            target_phrase = rep.group(1)
+            target_weapon = match_known_weapon(target_phrase, weapon_names)
+            target_model_hint = _model_hint_from_target_phrase(target_phrase, target_weapon)
+            choice_text = rep.group(2)
+        else:
+            add = re.search(r'(.+?)\s+(?:can|may)\s+(?:each\s+)?be\s+equipped\s+with\s+(.+)$', desc, re.IGNORECASE)
+            if add:
+                option_type = 'addition'
+                target_model_hint = _model_hint_from_add_subject(add.group(1))
+                choice_text = add.group(2)
+
+        bundles = _choice_bundles(choice_text, weapon_names)
+
+        # If exact parsing fails, expose each weapon mentioned after excluding the
+        # replacement target. This is better than displaying a checkbox that has no
+        # effect on the loadout.
+        if not bundles:
+            all_names = [n for n in find_known_weapons(desc, weapon_names) if n != target_weapon]
+            for name in all_names:
+                bundles[name] = [name]
+
+        if not bundles:
+            continue  # non-weapon wargear cannot affect attack math here
+
+        choices = list(bundles.keys())
+        option = WargearOption(
+            id=idx,
+            description=desc,
+            option_type=option_type,
+            target_weapon=target_weapon,
+            choices=choices,
+            choice_bundles=bundles,
+            target_model_hint=target_model_hint,
+            max_per_unit=max_per_unit,
+            per_x_models=per_x,
+            unlimited=unlimited,
+        )
+        option.selected_choice = choices[0]
+        result.append(option)
+    return result
+
+
+def get_unit_data(data: Dict[str, pd.DataFrame], datasheet_id: str) -> Optional[UnitData]:
+    units = data['units']
+    if units.empty:
+        return None
+    rows = units[units['id'] == datasheet_id]
+    if rows.empty:
+        return None
+    row = rows.iloc[0]
+    faction_id = str(row.get('faction_id', '') or '')
+    weapons = get_weapons(data['wargear'], datasheet_id)
+    weapon_names = sorted(set(w.name for w in weapons))
+    return UnitData(
+        id=datasheet_id,
+        name=clean_html(row.get('name')),
+        faction_id=faction_id,
+        faction_name=FACTION_NAMES.get(faction_id, faction_id),
+        loadout_text=clean_html(row.get('loadout')),
+        composition=parse_composition(data['composition'], datasheet_id),
+        models=get_models(data['models'], datasheet_id),
+        keywords=get_keywords(data['keywords'], datasheet_id),
+        abilities=get_abilities(data['abilities'], datasheet_id),
+        weapons=weapons,
+        options=parse_wargear_options(data['options'], datasheet_id, weapon_names),
+    )
+
+
+# ============================================================
+# 4. LOADOUT / WARGEAR ENGINE
+# ============================================================
+
+def build_model_names(unit: UnitData, requested_size: int) -> List[str]:
+    requested_size = max(1, requested_size)
+    if not unit.composition:
+        default_name = unit.models[0].name if unit.models else unit.name
+        return [default_name] * requested_size
+
+    names: List[str] = []
+    # First satisfy minimum composition.
+    for comp in unit.composition:
+        for _ in range(max(0, comp.get('min', 0))):
+            if len(names) < requested_size:
+                names.append(comp['name'])
+    # Then fill toward maximums.
+    for comp in unit.composition:
+        already = names.count(comp['name'])
+        capacity = max(0, comp.get('max', already) - already)
+        for _ in range(capacity):
+            if len(names) < requested_size:
+                names.append(comp['name'])
+    # Last fallback if the requested GUI size exceeds the composition data.
+    fallback = unit.composition[-1]['name'] if unit.composition else unit.name
+    while len(names) < requested_size:
+        names.append(fallback)
+    return names[:requested_size]
+
+
+def _equipment_list_weapons(equipment_text: str, weapon_names: List[str]) -> List[str]:
+    result: List[str] = []
+    for item in re.split(r';|·', equipment_text):
+        item = item.strip(' .;,:')
+        if not item:
+            continue
+        qty_match = re.match(r'^(\d+)\s+(.+)$', item)
+        qty = int(qty_match.group(1)) if qty_match else 1
+        name_text = qty_match.group(2) if qty_match else item
+        matched = match_known_weapon(name_text, weapon_names)
+        if matched:
+            result.extend([matched] * qty)
+    return result
+
+
+def parse_base_equipment_rules(loadout_text: str, weapon_names: List[str]) -> List[Tuple[str, List[str]]]:
+    """Parse datasheet default-equipment clauses as (scope, weapons).
+
+    Examples handled:
+      Every model is equipped with: storm bolter; power fist.
+      This model is equipped with: Smite; force weapon.
+      The Sergeant is additionally equipped with: plasma pistol.
+    """
+    text = clean_html(loadout_text)
+    if not text:
+        return []
+    pattern = re.compile(
+        r'([^.:]+?\b(?:is|are)\s+(?:additionally\s+)?equipped\s+with)\s*:\s*([^.]*)',
+        re.IGNORECASE,
+    )
+    rules: List[Tuple[str, List[str]]] = []
+    for match in pattern.finditer(text):
+        scope = match.group(1)
+        scope = re.sub(r'\b(?:is|are)\s+(?:additionally\s+)?equipped\s+with\b', '', scope, flags=re.IGNORECASE)
+        scope = scope.strip(' ,;:')
+        weapons = _equipment_list_weapons(match.group(2), weapon_names)
+        if weapons:
+            rules.append((scope, weapons))
+    return rules
+
+
+def _scope_matches_model(scope: str, model_name: str, unit_size: int) -> bool:
+    s = scope.lower().strip()
+    m = model_name.lower().strip()
+    if 'every model' in s or 'all models' in s:
+        return True
+    if 'this model' in s:
+        return True  # singular datasheets and model-specific records use this wording
+    # Remove articles/possessives and generic filler, then match against model type.
+    s = re.sub(r'^(?:the|one)\s+', '', s)
+    s = re.sub(r"['’]s$", '', s)
+    significant = [tok for tok in re.findall(r'[a-z0-9]+', s) if tok not in {'model', 'models'}]
+    return bool(significant) and all(tok in m for tok in significant)
+
+
+def parse_base_weapons(loadout_text: str, weapon_names: List[str]) -> List[str]:
+    """Compatibility fallback for datasheets whose loadout wording is unusual."""
+    rules = parse_base_equipment_rules(loadout_text, weapon_names)
+    if rules:
+        # Only return universally-scoped equipment here; build_loadout handles
+        # model-specific clauses itself.
+        universal: List[str] = []
+        for scope, weapons in rules:
+            if 'every model' in scope.lower() or 'this model' in scope.lower() or 'all models' in scope.lower():
+                universal.extend(weapons)
+        return universal
+    text = clean_html(loadout_text)
+    equipment = text.split(':', 1)[1] if ':' in text else text
+    return _equipment_list_weapons(equipment, weapon_names)
+
+
+def build_loadout(unit: UnitData, requested_size: int, options: List[WargearOption]) -> UnitLoadout:
+    model_names = build_model_names(unit, requested_size)
+    weapon_names = sorted(set(w.name for w in unit.weapons))
+    equipment_rules = parse_base_equipment_rules(unit.loadout_text, weapon_names)
+    if equipment_rules:
+        models = [ModelEquipment(name, []) for name in model_names]
+        for model in models:
+            for scope, weapons in equipment_rules:
+                if _scope_matches_model(scope, model.model_name, len(models)):
+                    model.weapons.extend(weapons)
+    else:
+        base_weapons = parse_base_weapons(unit.loadout_text, weapon_names)
+        models = [ModelEquipment(name, base_weapons.copy()) for name in model_names]
+
+    for option in options:
+        if not option.enabled or not option.selected_choice:
+            continue
+        count = max(1, option.selected_count)
+        choice = option.selected_choice
+        bundle = option.choice_bundles.get(choice, [choice])
+        applied = 0
+
+        def eligible(model: ModelEquipment) -> bool:
+            if not option.target_model_hint:
+                return True
+            hint_tokens = re.findall(r'[a-z0-9]+', option.target_model_hint.lower())
+            model_low = model.model_name.lower()
+            return all(token in model_low for token in hint_tokens)
+
+        if option.option_type == 'replacement' and option.target_weapon:
+            # Apply only to eligible models that actually carry the replaced weapon.
+            for model in models:
+                if applied >= count:
+                    break
+                if eligible(model) and option.target_weapon in model.weapons:
+                    model.weapons.remove(option.target_weapon)
+                    model.weapons.extend(bundle)
+                    applied += 1
+        else:
+            for model in models:
+                if applied >= count:
+                    break
+                if eligible(model):
+                    model.weapons.extend(bundle)
+                    applied += 1
+
+    return UnitLoadout(unit.name, models)
+
+
+# ============================================================
+# 5. EXACT ATTACK MATH
+# ============================================================
+
+def d6_final_face_distribution(success_fn, reroll_mode: str) -> Dict[int, float]:
+    """Distribution of final unmodified D6 faces after one allowed reroll."""
+    out: Dict[int, float] = defaultdict(float)
+    for first in range(1, 7):
+        p_first = 1.0 / 6.0
+        reroll = reroll_mode == 'all' and not success_fn(first)
+        reroll = reroll or (reroll_mode == 'ones' and first == 1)
+        if reroll:
+            for second in range(1, 7):
+                out[second] += p_first / 6.0
+        else:
+            out[first] += p_first
+    return dict(out)
+
+
+def hit_success(face: int, target: int, modifier: int) -> bool:
+    if face == 1:
+        return False
+    if face == 6:
+        return True
+    return face + modifier >= target
+
+
+def base_wound_target(strength: int, toughness: int) -> int:
+    if strength >= 2 * toughness:
+        return 2
+    if strength > toughness:
+        return 3
+    if strength == toughness:
+        return 4
+    if 2 * strength <= toughness:
+        return 6
+    return 5
+
+
+def anti_critical_threshold(weapon: Weapon, defender_keywords: List[str]) -> int:
+    defender_keys = {keyword_key(k) for k in defender_keywords}
+    thresholds = []
+    for key, value in weapon.keywords.items():
+        if not key.startswith('anti_'):
+            continue
+        anti_key = key[5:]
+        # Match exact keyword or a multi-word keyword that contains the relevant noun.
+        if anti_key in defender_keys or any(anti_key == k or anti_key in k.split('_') for k in defender_keys):
+            thresholds.append(int(value))
+    return min(thresholds) if thresholds else 6
+
+
+def wound_success(face: int, target: int, modifier: int, critical_on: int) -> bool:
+    if face == 1:
+        return False
+    if face >= critical_on:
+        return True
+    if face == 6:
+        return True
+    return face + modifier >= target
+
+
+def save_fail_probability(save: int, invuln: Optional[int], ap: int) -> float:
+    # AP is stored as negative values in the Wahapedia export. 3+ with AP -2 => 5+.
+    armour_needed = save - ap
+    best_needed = armour_needed
+    if invuln is not None:
+        best_needed = min(best_needed, invuln)
+    if best_needed <= 2:
+        save_success = 5.0 / 6.0  # unmodified 1 still fails
+    elif best_needed > 6:
+        save_success = 0.0
+    else:
+        save_success = (7 - best_needed) / 6.0
+    return 1.0 - save_success
+
+
+def _binomial_distribution(n: int, p: float) -> Dict[int, float]:
+    if n <= 0:
+        return {0: 1.0}
+    out: Dict[int, float] = {}
+    for k in range(n + 1):
+        out[k] = math.comb(n, k) * (p ** k) * ((1.0 - p) ** (n - k))
+    return out
+
+
+def _event_count_for_hit_scenario(normal_hits: int, lethal_auto_wounds: int,
+                                  normal_hit_event_p: float, lethal_event_p: float) -> Dict[int, float]:
+    dist = _binomial_distribution(normal_hits, normal_hit_event_p)
+    if lethal_auto_wounds:
+        lethal_dist = _binomial_distribution(lethal_auto_wounds, lethal_event_p)
+        dist = convolve_distributions(dist, lethal_dist)
+    return dist
+
+
+def per_attack_outcomes(
+    weapon: Weapon,
+    defender: ModelStats,
+    defender_keywords: List[str],
+    cover: bool,
+    moved_more_than_3: bool,
+    charging: bool,
+    hit_reroll: str,
+    wound_reroll: str,
+    sustained_override: int,
+    lethal_override: bool,
+) -> Dict[str, Any]:
+    # 11th ed: Heavy gives +1 to Hit if the unit has not moved >3" (other Heavy
+    # conditions are not represented in this GUI). Cover penalises ranged accuracy;
+    # Ignores Cover removes that penalty.
+    hit_modifier = 0
+    if weapon.keywords.get('heavy') and not moved_more_than_3:
+        hit_modifier += 1
+    if cover and not weapon.is_melee and not weapon.keywords.get('ignores_cover'):
+        hit_modifier -= 1
+    hit_modifier = clamp_modifier(hit_modifier)
+
+    sustained = max(int(weapon.keywords.get('sustained_hits', 0)), sustained_override)
+    lethal = bool(weapon.keywords.get('lethal_hits')) or lethal_override
+
+    wound_target = base_wound_target(weapon.strength, defender.toughness)
+    wound_modifier = 1 if weapon.keywords.get('lance') and charging else 0
+    wound_modifier = clamp_modifier(wound_modifier)
+    critical_on = anti_critical_threshold(weapon, defender_keywords)
+
+    effective_wound_reroll = 'all' if weapon.keywords.get('twin_linked') else wound_reroll
+    wound_success_fn = lambda face: wound_success(face, wound_target, wound_modifier, critical_on)
+    wound_faces = d6_final_face_distribution(wound_success_fn, effective_wound_reroll)
+    p_wound_per_roll = sum(p for face, p in wound_faces.items() if wound_success_fn(face))
+    p_crit_wound_per_roll = sum(
+        p for face, p in wound_faces.items()
+        if face >= critical_on and face != 1
+    )
+
+    fail_save = save_fail_probability(defender.save, defender.invuln, weapon.ap)
+    devastating = bool(weapon.keywords.get('devastating_wounds'))
+    if devastating:
+        p_normal_hit_damage_event = (
+            p_crit_wound_per_roll
+            + max(0.0, p_wound_per_roll - p_crit_wound_per_roll) * fail_save
+        )
+        p_regular_failed_per_normal_hit = max(0.0, p_wound_per_roll - p_crit_wound_per_roll) * fail_save
+        p_dev_per_normal_hit = p_crit_wound_per_roll
+    else:
+        p_normal_hit_damage_event = p_wound_per_roll * fail_save
+        p_regular_failed_per_normal_hit = p_wound_per_roll * fail_save
+        p_dev_per_normal_hit = 0.0
+
+    # Build an exact distribution of the number of damaging wound-events generated
+    # by ONE attack die. Sustained Hits can make this >1; Lethal Hits creates an
+    # auto-wound from the original Critical Hit while the Sustained bonus hits still
+    # roll to wound normally.
+    event_count_dist: Dict[int, float] = defaultdict(float)
+    expected_normal_hits = 0.0
+    expected_lethal_auto = 0.0
+    p_hit = 0.0
+    p_crit_hit = 0.0
+
+    if weapon.keywords.get('torrent'):
+        hit_scenarios = [(1.0, 1, 0)]  # probability, normal hits, lethal autos
+        p_hit = 1.0
+    else:
+        hit_success_fn = lambda face: hit_success(face, weapon.bs_ws, hit_modifier)
+        hit_faces = d6_final_face_distribution(hit_success_fn, hit_reroll)
+        hit_scenarios = []
+        for face, probability in hit_faces.items():
+            if not hit_success_fn(face):
+                hit_scenarios.append((probability, 0, 0))
+                continue
+            p_hit += probability
+            if face == 6:
+                p_crit_hit += probability
+                if lethal:
+                    hit_scenarios.append((probability, sustained, 1))
+                else:
+                    hit_scenarios.append((probability, 1 + sustained, 0))
+            else:
+                hit_scenarios.append((probability, 1, 0))
+
+    for scenario_prob, normal_hits, lethal_autos in hit_scenarios:
+        expected_normal_hits += scenario_prob * normal_hits
+        expected_lethal_auto += scenario_prob * lethal_autos
+        scenario_events = _event_count_for_hit_scenario(
+            normal_hits,
+            lethal_autos,
+            p_normal_hit_damage_event,
+            fail_save,
+        )
+        for count, probability in scenario_events.items():
+            event_count_dist[count] += scenario_prob * probability
+
+    # Numerical cleanup.
+    total = sum(event_count_dist.values())
+    if total > 0:
+        event_count_dist = {k: v / total for k, v in event_count_dist.items() if v > 1e-15}
+    else:
+        event_count_dist = {0: 1.0}
+
+    expected_events = average_distribution(event_count_dist)
+    expected_hits = expected_normal_hits + expected_lethal_auto
+    expected_wounds = expected_normal_hits * p_wound_per_roll + expected_lethal_auto
+    regular_failed = expected_normal_hits * p_regular_failed_per_normal_hit + expected_lethal_auto * fail_save
+    devastating_events = expected_normal_hits * p_dev_per_normal_hit
+
+    return {
+        'p_hit': p_hit,
+        'p_crit_hit': p_crit_hit,
+        'expected_hits': expected_hits,
+        'p_wound_per_roll': p_wound_per_roll,
+        'p_crit_wound_per_roll': p_crit_wound_per_roll,
+        'expected_wounds': expected_wounds,
+        'regular_failed': regular_failed,
+        'devastating': devastating_events,
+        'event_count_dist': dict(event_count_dist),
+        'expected_damaging_events': expected_events,
+    }
+
+
+def apply_one_damage_event_always(
+    state_dist: Dict[Tuple[int, int], float],
+    damage_dist: Dict[int, float],
+    defender_count: int,
+    wounds_per_model: int,
+) -> Dict[Tuple[int, int], float]:
+    out: Dict[Tuple[int, int], float] = defaultdict(float)
+    for (kills, wounds_taken), state_prob in state_dist.items():
+        if kills >= defender_count:
+            out[(defender_count, 0)] += state_prob
+            continue
+        for damage, damage_prob in damage_dist.items():
+            prob = state_prob * damage_prob
+            if damage <= 0:
+                out[(kills, wounds_taken)] += prob
+                continue
+            total = wounds_taken + damage
+            if total >= wounds_per_model:
+                new_kills = min(defender_count, kills + 1)
+                # Normal/Devastating weapon damage is allocated to one model; excess
+                # from that attack is discarded rather than spilling to the next model.
+                out[(new_kills, 0)] += prob
+            else:
+                out[(kills, total)] += prob
+    return dict(out)
+
+
+def apply_one_attack(
+    state_dist: Dict[Tuple[int, int], float],
+    event_count_dist: Dict[int, float],
+    damage_dist: Dict[int, float],
+    defender_count: int,
+    wounds_per_model: int,
+) -> Dict[Tuple[int, int], float]:
+    max_events = max(event_count_dist) if event_count_dist else 0
+    after_k = dict(state_dist)
+    mixed: Dict[Tuple[int, int], float] = defaultdict(float)
+    for k in range(max_events + 1):
+        weight = event_count_dist.get(k, 0.0)
+        if weight:
+            for state, probability in after_k.items():
+                mixed[state] += weight * probability
+        if k < max_events:
+            after_k = apply_one_damage_event_always(
+                after_k, damage_dist, defender_count, wounds_per_model
+            )
+    return dict(mixed)
+
+
+def resolve_attack_count_mixture(
+    initial_states: Dict[Tuple[int, int], float],
+    attack_count_dist: Dict[int, float],
+    event_count_dist: Dict[int, float],
+    damage_dist: Dict[int, float],
+    defender_count: int,
+    wounds_per_model: int,
+) -> Dict[Tuple[int, int], float]:
+    max_attacks = max(attack_count_dist) if attack_count_dist else 0
+    current = dict(initial_states)
+    mixed: Dict[Tuple[int, int], float] = defaultdict(float)
+    for attack_number in range(max_attacks + 1):
+        weight = attack_count_dist.get(attack_number, 0.0)
+        if weight:
+            for state, prob in current.items():
+                mixed[state] += weight * prob
+        if attack_number < max_attacks:
+            current = apply_one_attack(
+                current, event_count_dist, damage_dist,
+                defender_count, wounds_per_model
+            )
+    return dict(mixed)
+
+
+def weapon_group_attack_distribution(weapon: Weapon, copies: int, target_size: int, half_range: bool) -> Dict[int, float]:
+    one_copy = weapon.attack_distribution(target_size, half_range)
+    total = {0: 1.0}
+    for _ in range(max(0, copies)):
+        total = convolve_distributions(total, one_copy)
+    return total
+
+
+def calculate_attack(
+    weapon: Weapon,
+    weapon_count: int,
+    defender: ModelStats,
+    defender_count: int,
+    defender_keywords: List[str],
+    half_range: bool = False,
+    cover: bool = False,
+    charging: bool = False,
+    moved_more_than_3: bool = False,
+    hit_reroll: str = 'none',
+    wound_reroll: str = 'none',
+    sustained_override: int = 0,
+    lethal_override: bool = False,
+) -> AttackResult:
+    defender_count = max(1, defender_count)
+    weapon_count = max(1, weapon_count)
+
+    per_attack = per_attack_outcomes(
+        weapon, defender, defender_keywords, cover, moved_more_than_3,
+        charging, hit_reroll, wound_reroll, sustained_override, lethal_override,
+    )
+    attacks_dist = weapon_group_attack_distribution(weapon, weapon_count, defender_count, half_range)
+    avg_attacks = average_distribution(attacks_dist)
+    damage_dist = weapon.damage_distribution(half_range)
+    avg_damage_per_event = average_distribution(damage_dist)
+
+    # Exact defender-state distribution including variable attacks, variable damage,
+    # overkill on multi-wound models, and finite target model count.
+    states = resolve_attack_count_mixture(
+        {(0, 0): 1.0},
+        attacks_dist,
+        per_attack['event_count_dist'],
+        damage_dist,
+        defender_count,
+        max(1, defender.wounds),
+    )
+
+    expected_kills = sum(kills * prob for (kills, _), prob in states.items())
+    kill_probability = sum(prob for (kills, _), prob in states.items() if kills >= 1)
+    expected_wounds_current = sum(wounds * prob for (_, wounds), prob in states.items())
+    effective_damage_dist: Dict[int, float] = defaultdict(float)
+    for (kills, wounds), prob in states.items():
+        effective = min(defender_count * defender.wounds, kills * defender.wounds + wounds)
+        effective_damage_dist[effective] += prob
+
     return AttackResult(
         weapon_name=weapon.name,
-        attacker_count=attacker_count,
-        attacker_model=attacker_stats.name,
-        defender_model=defender_stats.name,
+        weapon_count=weapon_count,
+        defender_model=defender.name,
         defender_count=defender_count,
-        hit_prob=hit_prob,
-        avg_hits_per_attack=avg_hits_per_attack,
-        wound_prob=wound_prob,
-        save_fail_prob=save_fail_prob,
         avg_attacks=avg_attacks,
-        avg_hits=avg_hits,
-        avg_wounds=avg_wounds,
-        avg_failed_saves=avg_failed_saves,
-        avg_damage_per_failed_save=avg_damage_per_failed_save,
-        avg_total_damage=avg_total_damage,
+        hit_probability=per_attack['p_hit'],
+        critical_hit_probability=per_attack['p_crit_hit'],
+        avg_hits=avg_attacks * per_attack['expected_hits'],
+        wound_probability=per_attack['p_wound_per_roll'],
+        critical_wound_probability=per_attack['p_crit_wound_per_roll'],
+        avg_wounds=avg_attacks * per_attack['expected_wounds'],
+        regular_failed_saves=avg_attacks * per_attack['regular_failed'],
+        devastating_wounds=avg_attacks * per_attack['devastating'],
+        avg_damage=avg_attacks * per_attack['expected_damaging_events'] * avg_damage_per_event,
         expected_kills=expected_kills,
-        expected_wounds_remaining=expected_wounds_remaining,
-        kill_probability=kill_prob,
-        damage_distribution=damage_distribution
+        kill_probability=kill_probability,
+        expected_remaining_wounds_on_current=expected_wounds_current,
+        effective_damage_distribution=dict(effective_damage_dist),
     )
 
 
 # ============================================================
-# 7. ENHANCED WARGEAR WIDGET
+# 6. GUI WIDGETS
 # ============================================================
 
-class EnhancedWargearWidget:
-    """Widget for displaying and selecting wargear with model-by-model control."""
-    
-    def __init__(self, parent, option: EnhancedWargearOption, 
-                 unit_size: int, callback=None):
+class WargearOptionWidget:
+    def __init__(self, parent, option: WargearOption, unit_size: int, callback):
         self.option = option
         self.unit_size = unit_size
         self.callback = callback
         self.frame = ttk.Frame(parent)
-        self.frame.pack(fill=tk.X, pady=2, padx=5)
-        
-        # Create display text
-        display_text = self._get_display_text()
-        max_allowed = option.get_max_allowed(unit_size)
-        
-        # Top row: checkbox + description
-        top_frame = ttk.Frame(self.frame)
-        top_frame.pack(fill=tk.X)
-        
+        self.frame.pack(fill=tk.X, padx=4, pady=3)
+
         self.enabled = tk.BooleanVar(value=False)
-        self.check = ttk.Checkbutton(
-            top_frame, 
-            variable=self.enabled,
-            command=self._on_toggle
-        )
-        self.check.pack(side=tk.LEFT)
-        
-        self.label = ttk.Label(top_frame, text=display_text, 
-                               wraplength=400, justify=tk.LEFT)
-        self.label.pack(side=tk.LEFT, padx=(5, 10), fill=tk.X, expand=True)
-        
-        # Second row: controls (count + choice)
-        controls_frame = ttk.Frame(self.frame)
-        controls_frame.pack(fill=tk.X, padx=(25, 0))
-        
-        # Count selector
-        self.count_spin = None
-        if max_allowed > 1:
-            ttk.Label(controls_frame, text="Models:").pack(side=tk.LEFT)
-            self.count_spin = ttk.Spinbox(
-                controls_frame,
-                from_=0,
-                to=max_allowed,
-                width=4,
-                state="disabled"
-            )
-            self.count_spin.set(0)
-            self.count_spin.pack(side=tk.LEFT, padx=(5, 10))
-            self.count_spin.bind('<KeyRelease>', self._on_count_change)
-        
-        # Choice dropdown (if multiple choices)
-        self.choice_combo = None
-        if option.choices and len(option.choices) > 1:
-            self.choice_combo = ttk.Combobox(
-                controls_frame,
-                values=option.choices,
-                state="disabled",
-                width=25
-            )
-            if option.choices:
-                self.choice_combo.current(0)
-                option.selected_choice = option.choices[0]
-            self.choice_combo.pack(side=tk.LEFT, padx=5)
-            self.choice_combo.bind('<<ComboboxSelected>>', self._on_choice_change)
-        
-        # Info label showing max
-        if max_allowed > 0:
-            info_text = f"(max {max_allowed})"
-            ttk.Label(controls_frame, text=info_text, font=("", 8, "italic")).pack(side=tk.LEFT, padx=5)
-        
-        # If there's a target model, show it
-        if option.target_model:
-            ttk.Label(controls_frame, text=f"[{option.target_model}]", 
-                     font=("", 8, "bold")).pack(side=tk.LEFT, padx=5)
-    
-    def _get_display_text(self) -> str:
-        """Get clean display text."""
-        text = self.option.cleaned_description
-        
-        # Truncate if too long
-        if len(text) > 100:
-            text = text[:97] + "..."
-        
-        # Add type indicator
-        if self.option.option_type == 'replacement':
-            if self.option.target_weapon:
-                text = f"Replace {self.option.target_weapon} with: {text}"
-        elif self.option.option_type == 'addition':
-            text = f"Add: {text}"
-        
-        return text
-    
-    def _on_toggle(self):
-        """Handle checkbox toggle."""
+        ttk.Checkbutton(self.frame, variable=self.enabled, command=self.on_toggle).grid(row=0, column=0, sticky='nw')
+        ttk.Label(self.frame, text=option.description, wraplength=430, justify=tk.LEFT).grid(row=0, column=1, columnspan=4, sticky='w')
+
+        max_allowed = option.max_allowed(unit_size)
+        ttk.Label(self.frame, text='Models:').grid(row=1, column=1, sticky='w', padx=(0, 4))
+        self.count = ttk.Spinbox(self.frame, from_=1, to=max_allowed, width=4, state='disabled')
+        self.count.set(1)
+        self.count.grid(row=1, column=2, sticky='w')
+        self.count.bind('<KeyRelease>', self.on_change)
+        self.count.bind('<<Increment>>', self.on_change)
+        self.count.bind('<<Decrement>>', self.on_change)
+
+        ttk.Label(self.frame, text='Choice:').grid(row=1, column=3, sticky='w', padx=(10, 4))
+        self.choice = ttk.Combobox(self.frame, values=option.choices, width=28, state='disabled')
+        if option.choices:
+            self.choice.current(0)
+        self.choice.grid(row=1, column=4, sticky='we')
+        self.choice.bind('<<ComboboxSelected>>', self.on_change)
+
+        detail = 'replacement' if option.option_type == 'replacement' else 'addition'
+        if option.target_weapon:
+            detail += f"; replaces {option.target_weapon}"
+        if option.target_model_hint:
+            detail += f"; model {option.target_model_hint}"
+        ttk.Label(self.frame, text=f"[{detail}; max {max_allowed}]", font=('', 8, 'italic')).grid(row=2, column=1, columnspan=4, sticky='w')
+        self.frame.columnconfigure(4, weight=1)
+
+    def on_toggle(self):
         enabled = self.enabled.get()
+        self.count.config(state='normal' if enabled else 'disabled')
+        self.choice.config(state='readonly' if enabled else 'disabled')
         self.option.enabled = enabled
-        
-        # Enable/disable child widgets
-        if self.choice_combo:
-            self.choice_combo.config(state="normal" if enabled else "disabled")
-        if self.count_spin:
-            self.count_spin.config(state="normal" if enabled else "disabled")
-            if enabled:
-                self.option.selected_count = int(self.count_spin.get())
-            else:
-                self.option.selected_count = 0
-                self.option.applied_to_models = []
-        
-        if self.callback:
-            self.callback()
-    
-    def _on_count_change(self, *args):
-        """Handle count spinbox change."""
-        if self.count_spin and self.enabled.get():
-            try:
-                count = int(self.count_spin.get())
-                max_allowed = self.option.get_max_allowed(self.unit_size)
-                if count > max_allowed:
-                    count = max_allowed
-                    self.count_spin.set(count)
-                self.option.selected_count = count
-                if self.callback:
-                    self.callback()
-            except ValueError:
-                pass
-    
-    def _on_choice_change(self, *args):
-        """Handle choice dropdown change."""
-        if self.choice_combo:
-            self.option.selected_choice = self.choice_combo.get()
-            if self.callback:
-                self.callback()
-    
-    def get_selection(self) -> Optional[Dict]:
-        """Get the current selection."""
+        self.option.selected_count = int(self.count.get()) if enabled else 0
+        self.option.selected_choice = self.choice.get() if enabled else None
+        self.callback()
+
+    def on_change(self, *_):
         if not self.enabled.get():
-            return None
-        
-        return {
-            'enabled': True,
-            'count': self.option.selected_count,
-            'choice': self.option.selected_choice,
-            'option': self.option
-        }
+            return
+        try:
+            value = int(self.count.get())
+        except ValueError:
+            value = 1
+        value = max(1, min(value, self.option.max_allowed(self.unit_size)))
+        self.count.set(value)
+        self.option.selected_count = value
+        self.option.selected_choice = self.choice.get() or (self.option.choices[0] if self.option.choices else None)
+        self.callback()
 
-
-# ============================================================
-# 8. ENHANCED LOADOUT WIDGET
-# ============================================================
 
 class LoadoutDisplayWidget:
-    """Widget for displaying the unit loadout."""
-    
     def __init__(self, parent):
-        self.frame = ttk.LabelFrame(parent, text="Unit Loadout", padding="5")
-        self.frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
-        
-        self.text_widget = tk.Text(self.frame, height=8, wrap=tk.WORD, 
-                                   font=("Courier", 9), bg="#f0f0f0")
-        self.text_widget.pack(fill=tk.BOTH, expand=True)
-        
-        # Add scrollbar
-        scrollbar = ttk.Scrollbar(self.frame, orient=tk.VERTICAL, 
-                                  command=self.text_widget.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.text_widget.config(yscrollcommand=scrollbar.set)
-    
-    def update_loadout(self, loadout: UnitLoadout):
-        """Update the display with the current loadout."""
-        self.text_widget.delete(1.0, tk.END)
-        
-        if not loadout or not loadout.models:
-            self.text_widget.insert(tk.END, "No models loaded")
+        frame = ttk.LabelFrame(parent, text='Effective Unit Loadout', padding=5)
+        frame.pack(fill=tk.BOTH, expand=False, pady=(5, 0))
+        self.text = tk.Text(frame, height=7, wrap=tk.WORD, font=('Courier', 8))
+        self.text.pack(fill=tk.BOTH, expand=True)
+
+    def update(self, loadout: Optional[UnitLoadout]):
+        self.text.delete('1.0', tk.END)
+        if not loadout:
+            self.text.insert(tk.END, 'No loadout')
             return
-        
-        lines = []
-        lines.append(f"📋 {loadout.unit_name} - {loadout.total_models} models")
-        if loadout.total_points > 0:
-            lines.append(f"   Points: {loadout.total_points}")
-        lines.append("")
-        
-        lines.extend(loadout.get_display_lines())
-        
-        self.text_widget.insert(tk.END, "\n".join(lines))
+        lines = [f"{loadout.unit_name}: {loadout.total_models} models", ''] + loadout.display_lines()
+        self.text.insert(tk.END, '\n'.join(lines))
 
 
 # ============================================================
-# 9. MAIN GUI APPLICATION (Enhanced)
+# 7. MAIN GUI
 # ============================================================
 
 class MathHammerGUI:
-    def __init__(self, root):
+    def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("40k 11th Edition MathHammer")
-        self.root.geometry("1900x1000")
-        
-        self.data = None
-        self.units_cache = {}
-        
-        self.attacker_unit_data = None
-        self.defender_unit_data = None
-        self.attacker_weapons = []
-        self.attacker_stats = None
-        self.defender_stats = None
-        self.defender_keywords = []
-        self.wargear_widgets = []
-        self.current_loadout = None
-        
-        self.all_units = []
-        self.filtered_units = {'attacker': [], 'defender': []}
-        self.last_result = None
-        
-        self.create_menu()
-        self.create_main_frame()
+        self.root.title('Warhammer 40,000 11th Edition MathHammer')
+        self.root.geometry('1800x1000')
+
+        self.data: Dict[str, pd.DataFrame] = {}
+        self.units: List[UnitData] = []
+        self.attacker: Optional[UnitData] = None
+        self.defender: Optional[UnitData] = None
+        self.defender_stats: Optional[ModelStats] = None
+        self.current_loadout: Optional[UnitLoadout] = None
+        self.wargear_widgets: List[WargearOptionWidget] = []
+        self.weapon_groups: List[Tuple[Weapon, int]] = []
+        self.last_result: Optional[AttackResult] = None
+
+        self.create_ui()
         self.load_data()
-    
-    def create_menu(self):
-        menubar = tk.Menu(self.root)
-        file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Load Data", command=self.load_data)
-        file_menu.add_separator()
-        file_menu.add_command(label="Export Results", command=self.export_results)
-        file_menu.add_command(label="Exit", command=self.root.quit)
-        menubar.add_cascade(label="File", menu=file_menu)
-        
-        help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="About", command=self.show_about)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        
-        self.root.config(menu=menubar)
-    
-    def create_main_frame(self):
-        # Main container with paned windows
-        main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Left panel: Selection
-        left_frame = ttk.Frame(main_paned)
-        main_paned.add(left_frame, weight=1)
-        
-        # Right panel: Results
-        right_frame = ttk.Frame(main_paned)
-        main_paned.add(right_frame, weight=2)
-        
-        # Selection panel
-        selection_frame = ttk.Frame(left_frame)
-        selection_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Attacker panel
-        attacker_panel = ttk.LabelFrame(selection_frame, text="Attacker", padding="10")
-        attacker_panel.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 5))
-        self.create_unit_selector(attacker_panel, "attacker")
-        
-        # Defender panel
-        defender_panel = ttk.LabelFrame(selection_frame, text="Defender", padding="10")
-        defender_panel.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(5, 0))
-        self.create_unit_selector(defender_panel, "defender")
-        
-        # Right panel: Results and modifiers
-        result_top = ttk.Frame(right_frame)
-        result_top.pack(fill=tk.BOTH, expand=True)
-        
-        # Modifiers frame
-        mod_frame = ttk.LabelFrame(result_top, text="Modifiers", padding="10")
-        mod_frame.pack(side=tk.TOP, fill=tk.X)
-        self.create_modifiers(mod_frame)
-        
-        # Results frame
-        result_frame = ttk.LabelFrame(result_top, text="Results", padding="10")
-        result_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(5, 0))
-        
-        self.result_text = scrolledtext.ScrolledText(result_frame, height=15, font=("Courier", 9))
+
+    def create_ui(self):
+        paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        left = ttk.Frame(paned)
+        right = ttk.Frame(paned)
+        paned.add(left, weight=1)
+        paned.add(right, weight=2)
+
+        self.create_selector(left, 'attacker', 'Attacker')
+        self.create_selector(left, 'defender', 'Defender')
+
+        mods = ttk.LabelFrame(right, text='Modifiers', padding=8)
+        mods.pack(fill=tk.X)
+        self.half_range = tk.BooleanVar()
+        self.cover = tk.BooleanVar()
+        self.charging = tk.BooleanVar()
+        self.moved = tk.BooleanVar()
+        self.lethal = tk.BooleanVar()
+        ttk.Checkbutton(mods, text='Half Range', variable=self.half_range).grid(row=0, column=0, sticky='w', padx=4)
+        ttk.Checkbutton(mods, text='Target in Cover (-1 accuracy)', variable=self.cover).grid(row=0, column=1, sticky='w', padx=4)
+        ttk.Checkbutton(mods, text='Charging (Lance)', variable=self.charging).grid(row=0, column=2, sticky='w', padx=4)
+        ttk.Checkbutton(mods, text='Moved >3" (disables Heavy bonus)', variable=self.moved).grid(row=0, column=3, sticky='w', padx=4)
+        ttk.Checkbutton(mods, text='Add Lethal Hits', variable=self.lethal).grid(row=0, column=4, sticky='w', padx=4)
+
+        ttk.Label(mods, text='Hit reroll:').grid(row=1, column=0, sticky='e')
+        self.hit_reroll = tk.StringVar(value='none')
+        ttk.Combobox(mods, values=['none', 'ones', 'all'], textvariable=self.hit_reroll, width=8, state='readonly').grid(row=1, column=1, sticky='w')
+        ttk.Label(mods, text='Wound reroll:').grid(row=1, column=2, sticky='e')
+        self.wound_reroll = tk.StringVar(value='none')
+        ttk.Combobox(mods, values=['none', 'ones', 'all'], textvariable=self.wound_reroll, width=8, state='readonly').grid(row=1, column=3, sticky='w')
+        ttk.Label(mods, text='Sustained Hits override:').grid(row=1, column=4, sticky='e')
+        self.sustained = tk.IntVar(value=0)
+        ttk.Spinbox(mods, from_=0, to=6, width=4, textvariable=self.sustained).grid(row=1, column=5, sticky='w')
+
+        buttons = ttk.Frame(right)
+        buttons.pack(fill=tk.X, pady=5)
+        ttk.Button(buttons, text='⚔ CALCULATE', command=self.calculate).pack(side=tk.LEFT, padx=3)
+        ttk.Button(buttons, text='📊 Compare Equipped Weapons', command=self.compare_weapons).pack(side=tk.LEFT, padx=3)
+        ttk.Button(buttons, text='Clear', command=self.clear_results).pack(side=tk.LEFT, padx=3)
+        ttk.Button(buttons, text='Export', command=self.export_results).pack(side=tk.LEFT, padx=3)
+
+        result_frame = ttk.LabelFrame(right, text='Results', padding=5)
+        result_frame.pack(fill=tk.BOTH, expand=True)
+        self.result_text = scrolledtext.ScrolledText(result_frame, font=('Courier', 9))
         self.result_text.pack(fill=tk.BOTH, expand=True)
-        
-        # Button frame
-        btn_frame = ttk.Frame(result_top)
-        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
-        ttk.Button(btn_frame, text="⚔️ CALCULATE", command=self.calculate, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="📊 Compare Weapons", command=self.compare_all_weapons, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Clear Results", command=self.clear_results, width=15).pack(side=tk.LEFT, padx=2)
-        
-        self.status_var = tk.StringVar(value="Ready")
-        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-    
-    def create_unit_selector(self, parent, side):
-        # Faction filter
-        faction_frame = ttk.Frame(parent)
-        faction_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(faction_frame, text="Faction:").pack(side=tk.LEFT)
-        faction_combo = ttk.Combobox(faction_frame, state="readonly", width=20)
-        faction_combo.pack(side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True)
-        faction_combo['values'] = ['All Factions'] + sorted(FACTION_NAMES.values())
-        faction_combo.current(0)
-        setattr(self, f"{side}_faction_combo", faction_combo)
-        faction_combo.bind('<<ComboboxSelected>>', lambda e: self.filter_units(side))
-        
-        # Keyword filter
-        keyword_frame = ttk.Frame(parent)
-        keyword_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(keyword_frame, text="Keyword:").pack(side=tk.LEFT)
-        keyword_combo = ttk.Combobox(keyword_frame, state="readonly", width=15)
-        keyword_combo.pack(side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True)
-        keyword_combo['values'] = ['All Keywords'] + UNIT_KEYWORDS
-        keyword_combo.current(0)
-        setattr(self, f"{side}_keyword_combo", keyword_combo)
-        keyword_combo.bind('<<ComboboxSelected>>', lambda e: self.filter_units(side))
-        
-        # Search
-        search_frame = ttk.Frame(parent)
-        search_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT)
-        search_entry = ttk.Entry(search_frame, width=20)
-        search_entry.pack(side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True)
-        setattr(self, f"{side}_search_entry", search_entry)
-        search_entry.bind('<KeyRelease>', lambda e: self.filter_units(side))
-        
-        # Unit list
-        list_frame = ttk.Frame(parent)
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
-        listbox = tk.Listbox(list_frame, height=5, font=("Courier", 9))
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        listbox.config(yscrollcommand=scrollbar.set)
-        setattr(self, f"{side}_listbox", listbox)
-        listbox.bind('<<ListboxSelect>>', lambda e: self.on_unit_select(side))
-        
-        # Info text
-        info_frame = ttk.LabelFrame(parent, text="Unit Info", padding="5")
-        info_frame.pack(fill=tk.X, pady=(5, 0))
-        info_text = tk.Text(info_frame, height=4, wrap=tk.WORD, font=("Courier", 9))
-        info_text.pack(fill=tk.X)
-        setattr(self, f"{side}_info_text", info_text)
-        
-        # Controls
-        controls_frame = ttk.Frame(parent)
-        controls_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        ttk.Label(controls_frame, text="Count:").pack(side=tk.LEFT)
-        count_spin = ttk.Spinbox(controls_frame, from_=1, to=40, width=5)
-        count_spin.pack(side=tk.LEFT, padx=(5, 0))
-        count_spin.set(5 if side == "attacker" else 10)
-        setattr(self, f"{side}_count_spin", count_spin)
-        count_spin.bind('<KeyRelease>', lambda e: self.on_count_change(side))
-        
-        ttk.Label(controls_frame, text="Weapon:").pack(side=tk.LEFT, padx=(10, 0))
-        weapon_combo = ttk.Combobox(controls_frame, state="readonly", width=20)
-        weapon_combo.pack(side=tk.LEFT, padx=(5, 0), fill=tk.X, expand=True)
-        setattr(self, f"{side}_weapon_combo", weapon_combo)
-        weapon_combo.bind('<<ComboboxSelected>>', lambda e: self.on_weapon_select(side))
-        
-        # Weapon stats
-        weapon_stats_frame = ttk.LabelFrame(parent, text="Weapon Stats", padding="5")
-        weapon_stats_frame.pack(fill=tk.X, pady=(5, 0))
-        weapon_stats_text = tk.Text(weapon_stats_frame, height=3, wrap=tk.WORD, font=("Courier", 9))
-        weapon_stats_text.pack(fill=tk.X)
-        setattr(self, f"{side}_weapon_stats_text", weapon_stats_text)
-        
-        # Wargear Options - only for attacker
-        if side == "attacker":
-            wargear_frame = ttk.LabelFrame(parent, text="Wargear Options", padding="5")
-            wargear_frame.pack(fill=tk.X, pady=(5, 0))
-            
-            # Canvas with scrollbar for wargear options
-            wargear_canvas = tk.Canvas(wargear_frame, height=150)
-            wargear_scrollbar = ttk.Scrollbar(wargear_frame, orient="vertical", 
-                                              command=wargear_canvas.yview)
-            wargear_scrollable_frame = ttk.Frame(wargear_canvas)
-            
-            wargear_scrollable_frame.bind(
-                "<Configure>",
-                lambda e: wargear_canvas.configure(scrollregion=wargear_canvas.bbox("all"))
-            )
-            
-            wargear_canvas.create_window((0, 0), window=wargear_scrollable_frame, anchor="nw")
-            wargear_canvas.configure(yscrollcommand=wargear_scrollbar.set)
-            
-            wargear_canvas.pack(side="left", fill="both", expand=True)
-            wargear_scrollbar.pack(side="right", fill="y")
-            
-            setattr(self, f"{side}_wargear_frame", wargear_scrollable_frame)
-            setattr(self, f"{side}_wargear_canvas", wargear_canvas)
-            
-            # Loadout display
-            self.loadout_display = LoadoutDisplayWidget(parent)
-    
-    def create_modifiers(self, parent):
-        # First row - basic modifiers
-        row1 = ttk.Frame(parent)
-        row1.pack(fill=tk.X)
-        
-        self.half_range_var = tk.BooleanVar()
-        ttk.Checkbutton(row1, text="Half Range", variable=self.half_range_var).pack(side=tk.LEFT, padx=5)
-        
-        self.cover_var = tk.BooleanVar()
-        ttk.Checkbutton(row1, text="Cover (-1 to hit)", variable=self.cover_var).pack(side=tk.LEFT, padx=5)
-        
-        self.charging_var = tk.BooleanVar()
-        ttk.Checkbutton(row1, text="Charging (Lance)", variable=self.charging_var).pack(side=tk.LEFT, padx=5)
-        
-        self.moved_var = tk.BooleanVar()
-        ttk.Checkbutton(row1, text="Moved >3\" (Heavy)", variable=self.moved_var).pack(side=tk.LEFT, padx=5)
-        
-        # Second row - rerolls
-        row2 = ttk.Frame(parent)
-        row2.pack(fill=tk.X, pady=(5, 0))
-        
-        ttk.Label(row2, text="Hit Rerolls:").pack(side=tk.LEFT, padx=5)
-        self.hit_reroll_var = tk.StringVar(value="none")
-        rr_frame = ttk.Frame(row2)
-        rr_frame.pack(side=tk.LEFT)
-        ttk.Radiobutton(rr_frame, text="None", variable=self.hit_reroll_var, value="none").pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(rr_frame, text="1s", variable=self.hit_reroll_var, value="ones").pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(rr_frame, text="All", variable=self.hit_reroll_var, value="all").pack(side=tk.LEFT, padx=2)
-        
-        ttk.Label(row2, text="Wound Rerolls:").pack(side=tk.LEFT, padx=(20, 5))
-        self.wound_reroll_var = tk.StringVar(value="none")
-        rr_frame2 = ttk.Frame(row2)
-        rr_frame2.pack(side=tk.LEFT)
-        ttk.Radiobutton(rr_frame2, text="None", variable=self.wound_reroll_var, value="none").pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(rr_frame2, text="1s", variable=self.wound_reroll_var, value="ones").pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(rr_frame2, text="All", variable=self.wound_reroll_var, value="all").pack(side=tk.LEFT, padx=2)
-        
-        # Third row - sustained and lethal
-        row3 = ttk.Frame(parent)
-        row3.pack(fill=tk.X, pady=(5, 0))
-        
-        ttk.Label(row3, text="Sustained Hits:").pack(side=tk.LEFT, padx=5)
-        self.sustained_var = tk.StringVar(value="0")
-        sus_frame = ttk.Frame(row3)
-        sus_frame.pack(side=tk.LEFT)
-        for v in ['0', '1', '2', '3']:
-            ttk.Radiobutton(sus_frame, text=v, variable=self.sustained_var, value=v).pack(side=tk.LEFT, padx=2)
-        
-        self.lethal_var = tk.BooleanVar()
-        ttk.Checkbutton(row3, text="Lethal Hits", variable=self.lethal_var).pack(side=tk.LEFT, padx=(20, 5))
-        
-        # Defender keywords display
-        row4 = ttk.Frame(parent)
-        row4.pack(fill=tk.X, pady=(5, 0))
-        ttk.Label(row4, text="Defender Keywords:", font=("", 10, "bold")).pack(anchor=tk.W, padx=5)
-        self.defender_keywords_text = tk.Text(row4, height=2, wrap=tk.WORD, font=("Courier", 8))
-        self.defender_keywords_text.pack(fill=tk.X, padx=5, pady=(2, 0))
-    
+
+        self.status = tk.StringVar(value='Ready')
+        ttk.Label(self.root, textvariable=self.status, relief=tk.SUNKEN, anchor='w').pack(fill=tk.X)
+
+    def create_selector(self, parent, side: str, title: str):
+        frame = ttk.LabelFrame(parent, text=title, padding=6)
+        frame.pack(fill=tk.BOTH, expand=True, pady=4)
+
+        filter_row = ttk.Frame(frame)
+        filter_row.pack(fill=tk.X)
+        ttk.Label(filter_row, text='Faction:').pack(side=tk.LEFT)
+        faction = ttk.Combobox(filter_row, state='readonly', width=20)
+        faction.pack(side=tk.LEFT, padx=3)
+        setattr(self, f'{side}_faction', faction)
+        faction.bind('<<ComboboxSelected>>', lambda e, s=side: self.filter_units(s))
+
+        search = ttk.Entry(filter_row)
+        search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=3)
+        setattr(self, f'{side}_search', search)
+        search.bind('<KeyRelease>', lambda e, s=side: self.filter_units(s))
+
+        listbox = tk.Listbox(frame, height=7, font=('Courier', 8))
+        listbox.pack(fill=tk.BOTH, expand=True)
+        setattr(self, f'{side}_listbox', listbox)
+        listbox.bind('<<ListboxSelect>>', lambda e, s=side: self.on_unit_select(s))
+
+        controls = ttk.Frame(frame)
+        controls.pack(fill=tk.X, pady=3)
+        ttk.Label(controls, text='Count:').pack(side=tk.LEFT)
+        count = ttk.Spinbox(controls, from_=1, to=40, width=4)
+        count.set(5 if side == 'attacker' else 10)
+        count.pack(side=tk.LEFT, padx=3)
+        setattr(self, f'{side}_count', count)
+        count.bind('<KeyRelease>', lambda e, s=side: self.on_count_change(s))
+
+        if side == 'attacker':
+            ttk.Label(controls, text='Equipped weapon:').pack(side=tk.LEFT, padx=(10, 3))
+            weapon = ttk.Combobox(controls, state='readonly', width=32)
+            weapon.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            self.attacker_weapon = weapon
+            weapon.bind('<<ComboboxSelected>>', lambda e: self.update_weapon_stats())
+
+        info = tk.Text(frame, height=5, wrap=tk.WORD, font=('Courier', 8))
+        info.pack(fill=tk.X)
+        setattr(self, f'{side}_info', info)
+
+        if side == 'attacker':
+            wg = ttk.LabelFrame(frame, text='Wargear Options (affects calculations)', padding=4)
+            wg.pack(fill=tk.X, pady=4)
+            canvas = tk.Canvas(wg, height=180)
+            scrollbar = ttk.Scrollbar(wg, orient=tk.VERTICAL, command=canvas.yview)
+            inner = ttk.Frame(canvas)
+            inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+            canvas.create_window((0, 0), window=inner, anchor='nw')
+            canvas.configure(yscrollcommand=scrollbar.set)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            self.wargear_inner = inner
+            self.loadout_display = LoadoutDisplayWidget(frame)
+            self.weapon_stats = tk.Text(frame, height=4, font=('Courier', 8))
+            self.weapon_stats.pack(fill=tk.X, pady=(4, 0))
+
     def load_data(self):
-        self.status_var.set("Loading data...")
         try:
+            self.status.set('Loading CSV data...')
             self.data = load_all_data('.')
-            self.all_units = []
-            
+            self.units = []
+            if self.data['units'].empty:
+                raise RuntimeError('Datasheets.csv not found or empty')
             for _, row in self.data['units'].iterrows():
-                datasheet_id = row['id'] if pd.notna(row['id']) else ''
+                datasheet_id = str(row.get('id', '') or '')
                 if not datasheet_id:
                     continue
-                
                 try:
-                    unit_data = get_unit_data(self.data, datasheet_id)
-                    if unit_data:
-                        self.units_cache[datasheet_id] = unit_data
-                        self.all_units.append({
-                            'id': datasheet_id,
-                            'name': unit_data.name,
-                            'faction_name': unit_data.faction_name,
-                            'keywords': unit_data.keywords,
-                            'unit_data': unit_data
-                        })
-                except Exception as e:
-                    print(f"Error loading unit {datasheet_id}: {e}")
-                    continue
-            
-            self.status_var.set(f"Loaded {len(self.all_units)} units")
-            self.filter_units("attacker")
-            self.filter_units("defender")
-        except Exception as e:
-            self.status_var.set(f"Error loading data: {e}")
-            messagebox.showerror("Error", f"Failed to load data: {e}")
-    
-    def filter_units(self, side):
-        faction_combo = getattr(self, f"{side}_faction_combo")
-        keyword_combo = getattr(self, f"{side}_keyword_combo")
-        search_entry = getattr(self, f"{side}_search_entry")
-        listbox = getattr(self, f"{side}_listbox")
-        
-        faction = faction_combo.get()
-        keyword = keyword_combo.get()
-        search = search_entry.get().strip().lower()
-        
-        filtered = []
-        for unit in self.all_units:
-            if faction != 'All Factions' and unit['faction_name'] != faction:
-                continue
-            
-            if keyword != 'All Keywords':
-                unit_keywords = unit.get('keywords', [])
-                if keyword not in unit_keywords:
-                    continue
-            
-            if search and search not in unit['name'].lower():
-                continue
-            
-            filtered.append(unit)
-        
+                    unit = get_unit_data(self.data, datasheet_id)
+                    if unit:
+                        self.units.append(unit)
+                except Exception as exc:
+                    print(f'Unit {datasheet_id} skipped: {exc}')
+            factions = ['All Factions'] + sorted(set(u.faction_name for u in self.units))
+            for side in ('attacker', 'defender'):
+                combo = getattr(self, f'{side}_faction')
+                combo['values'] = factions
+                combo.current(0)
+                self.filter_units(side)
+            self.status.set(f'Loaded {len(self.units)} units')
+        except Exception as exc:
+            self.status.set(f'Load error: {exc}')
+            messagebox.showerror('Load Error', str(exc))
+
+    def filter_units(self, side: str):
+        faction = getattr(self, f'{side}_faction').get()
+        search = getattr(self, f'{side}_search').get().strip().lower()
+        filtered = [
+            u for u in self.units
+            if (faction in ('', 'All Factions') or u.faction_name == faction)
+            and (not search or search in u.name.lower())
+        ]
+        setattr(self, f'{side}_filtered', filtered)
+        listbox = getattr(self, f'{side}_listbox')
         listbox.delete(0, tk.END)
-        setattr(self, f"{side}_search_results", filtered)
-        
-        for unit in filtered[:50]:
-            listbox.insert(tk.END, f"{unit['name']} ({unit['faction_name']})")
-        
-        self.status_var.set(f"Found {len(filtered)} units for {side}")
-    
-    def on_unit_select(self, side):
-        listbox = getattr(self, f"{side}_listbox")
+        for unit in filtered[:200]:
+            listbox.insert(tk.END, f'{unit.name} ({unit.faction_name})')
+
+    def on_unit_select(self, side: str):
+        listbox = getattr(self, f'{side}_listbox')
         if not listbox.curselection():
             return
-        
-        idx = listbox.curselection()[0]
-        results = getattr(self, f"{side}_search_results")
-        if idx >= len(results):
+        index = listbox.curselection()[0]
+        filtered = getattr(self, f'{side}_filtered')
+        if index >= len(filtered):
             return
-        
-        unit_info = results[idx]
-        unit_data = unit_info['unit_data']
-        
-        if side == "attacker":
-            self.attacker_unit_data = unit_data
-            self.attacker_weapons = unit_data.weapons
-            self.attacker_stats = unit_data.models[0] if unit_data.models else None
-            self.load_attacker_weapons(unit_data)
-            self.load_wargear_options(unit_data)
-            self.build_loadout()
+        unit = filtered[index]
+        if side == 'attacker':
+            self.attacker = unit
+            self.load_wargear_widgets()
+            self.rebuild_loadout()
         else:
-            self.defender_unit_data = unit_data
-            self.defender_stats = unit_data.models[0] if unit_data.models else None
-            self.defender_keywords = unit_data.keywords
-        
-        self.update_unit_info(side, unit_data)
-    
-    def update_unit_info(self, side, unit_data):
-        info_text = getattr(self, f"{side}_info_text")
-        info_text.delete(1.0, tk.END)
-        
-        lines = []
-        lines.append(f"📋 {unit_data.name}")
-        lines.append(f"  Faction: {unit_data.faction_name}")
-        
-        comp_str = ", ".join([f"{m['min']}-{m['max']} {m['name']}" for m in unit_data.composition])
-        lines.append(f"  Composition: {comp_str}")
-        
-        if unit_data.keywords:
-            lines.append(f"  Keywords: {', '.join(unit_data.keywords[:10])}")
-        
-        if unit_data.models:
-            stats = unit_data.models[0]
-            invuln_str = f" {stats.invuln}+" if stats.invuln else ""
-            lines.append(f"  Stats: M{stats.movement} T{stats.toughness} Sv{stats.save}+{invuln_str} W{stats.wounds} Ld{stats.leadership}+ OC{stats.oc}")
-        
-        if unit_data.abilities:
-            ab_str = ", ".join([a['name'] for a in unit_data.abilities[:3]])
-            lines.append(f"  Abilities: {ab_str}")
-        
-        info_text.insert(tk.END, "\n".join(lines))
-        
-        if side == "defender" and hasattr(self, 'defender_keywords_text'):
-            self.defender_keywords_text.delete(1.0, tk.END)
-            self.defender_keywords_text.insert(tk.END, ", ".join(unit_data.keywords))
-    
-    def load_attacker_weapons(self, unit_data):
-        weapons = unit_data.weapons
-        self.attacker_weapons = weapons
-        
-        weapon_combo = self.attacker_weapon_combo
-        weapon_combo['values'] = [w.name for w in weapons]
-        if weapons:
-            weapon_combo.current(0)
-            self.update_weapon_stats(self.attacker_weapon_stats_text, weapons[0])
-        else:
-            weapon_combo.set("No weapons found")
-            self.update_weapon_stats(self.attacker_weapon_stats_text, None)
-    
-    def load_wargear_options(self, unit_data):
-        """Load and display enhanced wargear options."""
-        wargear_frame = getattr(self, "attacker_wargear_frame")
-        
-        # Clear existing widgets
-        for widget in wargear_frame.winfo_children():
-            widget.destroy()
-        
+            self.defender = unit
+            self.defender_stats = unit.models[0] if unit.models else None
+        self.update_unit_info(side, unit)
+
+    def update_unit_info(self, side: str, unit: UnitData):
+        widget = getattr(self, f'{side}_info')
+        widget.delete('1.0', tk.END)
+        lines = [unit.name, f'Faction: {unit.faction_name}']
+        if unit.models:
+            m = unit.models[0]
+            inv = f' Inv{m.invuln}+' if m.invuln else ''
+            lines.append(f'T{m.toughness} Sv{m.save}+{inv} W{m.wounds} Ld{m.leadership}+ OC{m.oc}')
+        if unit.keywords:
+            lines.append('Keywords: ' + ', '.join(unit.keywords[:12]))
+        if unit.loadout_text:
+            lines.append('Base: ' + unit.loadout_text[:180])
+        widget.insert(tk.END, '\n'.join(lines))
+
+    def load_wargear_widgets(self):
+        for child in self.wargear_inner.winfo_children():
+            child.destroy()
         self.wargear_widgets = []
-        
-        if not unit_data.options:
-            ttk.Label(wargear_frame, text="No wargear options available", 
-                     font=("", 9, "italic")).pack(pady=5)
+        if not self.attacker:
             return
-        
-        # Get unit size
         try:
-            unit_size = int(self.attacker_count_spin.get())
-        except:
-            unit_size = 5
-        
-        # Display options with enhanced widgets
-        for option in unit_data.options:
-            # Skip options that don't make sense to show
-            if option.cleaned_description.lower().strip() in ['none', 'or', '']:
+            size = int(self.attacker_count.get())
+        except ValueError:
+            size = 5
+        if not self.attacker.options:
+            ttk.Label(self.wargear_inner, text='No weapon-changing wargear options parsed for this unit.').pack(anchor='w')
+            return
+        # Reset state when loading a unit / changing size.
+        for option in self.attacker.options:
+            if option.max_allowed(size) <= 0:
                 continue
-            
-            widget = EnhancedWargearWidget(
-                wargear_frame, 
-                option, 
-                unit_size,
-                callback=self.on_wargear_change
-            )
+            option.enabled = False
+            option.selected_count = 0
+            option.selected_choice = option.choices[0] if option.choices else None
+            widget = WargearOptionWidget(self.wargear_inner, option, size, self.rebuild_loadout)
             self.wargear_widgets.append(widget)
-        
-        # Update canvas height
-        wargear_canvas = getattr(self, "attacker_wargear_canvas")
-        height = min(250, len(self.wargear_widgets) * 45 + 20)
-        wargear_canvas.configure(height=height)
-        
-        if not self.wargear_widgets:
-            ttk.Label(wargear_frame, text="No applicable wargear options", 
-                     font=("", 9, "italic")).pack(pady=5)
-    
-    def on_wargear_change(self):
-        """Called when any wargear option changes."""
-        self.build_loadout()
-    
-    def on_count_change(self, side):
-        """Called when model count changes."""
-        if side == "attacker" and self.attacker_unit_data:
-            self.load_wargear_options(self.attacker_unit_data)
-            self.build_loadout()
-    
-    def build_loadout(self):
-        """Build the unit loadout from selected wargear."""
-        if not self.attacker_unit_data:
+
+    def on_count_change(self, side: str):
+        if side == 'attacker' and self.attacker:
+            self.load_wargear_widgets()
+            self.rebuild_loadout()
+
+    def rebuild_loadout(self):
+        if not self.attacker:
             return
-        
-        unit_data = self.attacker_unit_data
         try:
-            unit_size = int(self.attacker_count_spin.get())
-        except:
-            unit_size = 5
-        
-        # Create loadout
-        loadout = UnitLoadout(
-            unit_name=unit_data.name,
-            total_models=unit_size
-        )
-        
-        # Build model list from composition
-        if unit_data.composition:
-            for comp in unit_data.composition:
-                # For each model type in composition
-                model_name = comp['name']
-                min_count = comp.get('min', 1)
-                max_count = comp.get('max', 1)
-                
-                # Determine how many of this model type
-                if max_count == 0:
-                    continue
-                
-                count = min(max_count, unit_size)
-                if count <= 0:
-                    continue
-                
-                # Add models
-                for i in range(count):
-                    model = ModelEquipment(
-                        model_name=model_name,
-                        is_character='champion' in model_name.lower() or 'captain' in model_name.lower()
-                    )
-                    loadout.models.append(model)
+            size = int(self.attacker_count.get())
+        except ValueError:
+            size = 5
+        self.current_loadout = build_loadout(self.attacker, size, self.attacker.options)
+        self.loadout_display.update(self.current_loadout)
+        self.refresh_equipped_weapons()
+
+    def refresh_equipped_weapons(self):
+        if not self.attacker:
+            self.weapon_groups = []
+            self.attacker_weapon['values'] = []
+            return
+        counts = self.current_loadout.weapon_counts() if self.current_loadout else {}
+
+        groups: List[Tuple[Weapon, int]] = []
+        for weapon in self.attacker.weapons:
+            count = counts.get(weapon.name, 0)
+            if count > 0:
+                groups.append((weapon, count))
+
+        # If the textual base loadout cannot be parsed, keep the application useful:
+        # expose all weapon profiles at unit-size count. Wargear additions/replacements
+        # still take precedence whenever they produce a real loadout weapon count.
+        if not groups:
+            try:
+                fallback_count = int(self.attacker_count.get())
+            except ValueError:
+                fallback_count = 1
+            groups = [(w, fallback_count) for w in self.attacker.weapons]
+            self.status.set('Base loadout could not be mapped exactly; showing fallback weapon counts.')
+
+        self.weapon_groups = groups
+        labels = [f'{weapon.name} ×{count} [{weapon.weapon_type}]' for weapon, count in groups]
+        self.attacker_weapon['values'] = labels
+        if labels:
+            self.attacker_weapon.current(0)
+            self.update_weapon_stats()
         else:
-            # Fallback: use the first model stat
-            if unit_data.models:
-                model = ModelEquipment(
-                    model_name=unit_data.models[0].name,
-                    is_character=False
-                )
-                loadout.models = [model] * unit_size
-        
-        # Apply wargear selections
-        for widget in self.wargear_widgets:
-            selection = widget.get_selection()
-            if selection:
-                option = selection['option']
-                count = selection['count']
-                choice = selection['choice']
-                
-                # Apply to models
-                for i in range(min(count, len(loadout.models))):
-                    model = loadout.models[i]
-                    
-                    if option.option_type == 'replacement':
-                        # Replace target weapon
-                        if option.target_weapon and option.target_weapon in model.weapons:
-                            model.weapons.remove(option.target_weapon)
-                        if choice:
-                            model.weapons.append(choice)
-                    elif option.option_type == 'addition':
-                        if choice and choice not in model.weapons:
-                            model.weapons.append(choice)
-                    elif option.option_type == 'toggle':
-                        if choice and choice not in model.wargear:
-                            model.wargear.append(choice)
-        
-        self.current_loadout = loadout
-        self.loadout_display.update_loadout(loadout)
-    
-    def on_weapon_select(self, side):
-        if side == "attacker":
-            idx = self.attacker_weapon_combo.current()
-            if idx >= 0 and idx < len(self.attacker_weapons):
-                self.update_weapon_stats(self.attacker_weapon_stats_text, self.attacker_weapons[idx])
-    
-    def update_weapon_stats(self, text_widget, weapon):
-        text_widget.delete(1.0, tk.END)
-        
-        if not weapon:
-            text_widget.insert(tk.END, "No weapon selected")
+            self.attacker_weapon.set('No equipped weapons')
+            self.update_weapon_stats()
+
+    def selected_weapon_group(self) -> Optional[Tuple[Weapon, int]]:
+        idx = self.attacker_weapon.current()
+        if idx < 0 or idx >= len(self.weapon_groups):
+            return None
+        return self.weapon_groups[idx]
+
+    def update_weapon_stats(self):
+        self.weapon_stats.delete('1.0', tk.END)
+        group = self.selected_weapon_group()
+        if not group:
+            self.weapon_stats.insert(tk.END, 'No weapon selected')
             return
-        
-        lines = []
-        attacks_str = f"{weapon.attacks_dice[0]}D{weapon.attacks_dice[1]}" if weapon.attacks_dice[0] > 0 else str(weapon.attacks_dice[2])
-        if weapon.attacks_dice[2] > 0 and weapon.attacks_dice[0] > 0:
-            attacks_str += f"+{weapon.attacks_dice[2]}"
-        
-        lines.append(f"  {weapon.name}")
-        lines.append(f"  Type: {weapon.weapon_type} | Range: {weapon.range}")
-        lines.append(f"  A: {attacks_str} | BS/WS: {weapon.bs_ws}+ | S: {weapon.strength} | AP: {weapon.ap} | D: {weapon.damage_dice}")
-        
-        kw_str = weapon.get_keyword_string()
-        if kw_str and kw_str != "None":
-            lines.append(f"  Keywords: {kw_str}")
-        
-        avg_dmg = weapon.get_average_damage()
-        lines.append(f"  Avg Damage: {avg_dmg:.1f}")
-        
-        text_widget.insert(tk.END, "\n".join(lines))
-    
-    def get_selected_wargear(self) -> List[Dict]:
-        """Get selected wargear options."""
-        selected = []
-        for widget in self.wargear_widgets:
-            selection = widget.get_selection()
-            if selection:
-                selected.append(selection)
-        return selected
-    
-    def calculate(self):
-        if not self.attacker_unit_data:
-            messagebox.showwarning("Missing Selection", "Please select an attacker unit.")
-            return
-        
-        if not self.defender_unit_data:
-            messagebox.showwarning("Missing Selection", "Please select a defender unit.")
-            return
-        
-        if not self.attacker_weapons:
-            messagebox.showwarning("No Weapons", "No weapons found for the attacker.")
-            return
-        
-        weapon_idx = self.attacker_weapon_combo.current()
-        if weapon_idx < 0 or weapon_idx >= len(self.attacker_weapons):
-            weapon_idx = 0
-        weapon = self.attacker_weapons[weapon_idx]
-        
-        # Get selected wargear
-        selected_wargear = self.get_selected_wargear()
-        if selected_wargear:
-            self.status_var.set(f"Using wargear: {len(selected_wargear)} options selected")
-        
-        try:
-            attacker_count = int(self.attacker_count_spin.get())
-        except:
-            attacker_count = 5
-        
-        try:
-            defender_count = int(self.defender_count_spin.get())
-        except:
-            defender_count = 10
-        
-        half_range = self.half_range_var.get()
-        cover = self.cover_var.get()
-        charging = self.charging_var.get()
-        moved = self.moved_var.get()
-        lethal = self.lethal_var.get()
-        
-        hit_reroll = self.hit_reroll_var.get()
-        reroll_hit_ones = hit_reroll == "ones"
-        reroll_hit_all = hit_reroll == "all"
-        
-        wound_reroll = self.wound_reroll_var.get()
-        reroll_wound_ones = wound_reroll == "ones"
-        reroll_wound_all = wound_reroll == "all"
-        
-        sustained = int(self.sustained_var.get())
-        
-        if not self.defender_stats and self.defender_unit_data:
-            if self.defender_unit_data.models:
-                self.defender_stats = self.defender_unit_data.models[0]
-        
-        if not self.defender_stats:
-            messagebox.showwarning("No Stats", "Could not find defender stats.")
-            return
-        
-        if not self.attacker_stats and self.attacker_unit_data:
-            if self.attacker_unit_data.models:
-                self.attacker_stats = self.attacker_unit_data.models[0]
-        
-        if not self.attacker_stats:
-            messagebox.showwarning("No Stats", "Could not find attacker stats.")
-            return
-        
-        defender_keywords = self.defender_keywords if self.defender_keywords else ['infantry']
-        
-        result = calculate_attack(
-            weapon=weapon,
-            attacker_stats=self.attacker_stats,
-            attacker_count=attacker_count,
-            defender_stats=self.defender_stats,
-            defender_count=defender_count,
-            defender_keywords=defender_keywords,
-            half_range=half_range,
-            cover=cover,
-            charging=charging,
-            moved_more_than_3=moved,
-            reroll_hit_ones=reroll_hit_ones,
-            reroll_hit_all=reroll_hit_all,
-            reroll_wound_ones=reroll_wound_ones,
-            reroll_wound_all=reroll_wound_all,
-            sustained_hits=sustained,
-            lethal_hits=lethal
+        weapon, count = group
+        self.weapon_stats.insert(
+            tk.END,
+            f'{weapon.name} ×{count} | {weapon.weapon_type} {weapon.range}\n'
+            f'A {dice_to_string(weapon.attacks_dice)} | {"WS" if weapon.is_melee else "BS"} {weapon.bs_ws}+ | '
+            f'S {weapon.strength} | AP {weapon.ap} | D {dice_to_string(weapon.damage_dice)}\n'
+            f'{weapon.keyword_string()}'
         )
-        
-        self.display_results(result)
-        self.last_result = result
-    
-    def display_results(self, result: AttackResult):
-        self.result_text.delete(1.0, tk.END)
-        
-        output = []
-        output.append(f"{'='*80}")
-        output.append(f"⚔️  {result.attacker_count} x {result.attacker_model} with {result.weapon_name}")
-        output.append(f"   vs {result.defender_count} x {result.defender_model}")
-        output.append(f"   (T{self.defender_stats.toughness} Sv{self.defender_stats.save}+ W{self.defender_stats.wounds})")
-        output.append(f"{'='*80}\n")
-        
-        output.append("📊 Per-Attack Probabilities:")
-        output.append(f"  Hit:              {result.hit_prob * 100:.1f}%")
-        if result.avg_hits_per_attack > result.hit_prob:
-            output.append(f"    (with Sustained: {result.avg_hits_per_attack * 100:.1f}% avg hits/attack)")
-        output.append(f"  Wound:            {result.wound_prob * 100:.1f}%")
-        output.append(f"  Failed Save:      {result.save_fail_prob * 100:.1f}%")
-        output.append("")
-        
-        output.append("📈 Expected Values:")
-        output.append(f"  Average Attacks:        {result.avg_attacks:.2f}")
-        output.append(f"  Average Hits:           {result.avg_hits:.2f}")
-        output.append(f"  Average Wounds:         {result.avg_wounds:.2f}")
-        output.append(f"  Average Failed Saves:   {result.avg_failed_saves:.2f}")
-        output.append(f"  Avg Damage/Failed Save: {result.avg_damage_per_failed_save:.2f}")
-        output.append(f"  Average Total Damage:   {result.avg_total_damage:.2f}")
-        output.append("")
-        
-        output.append("💀 Expected Results:")
-        output.append(f"  Expected Kills:         {result.expected_kills:.2f} models")
-        output.append(f"  Wounds on last model:   {result.expected_wounds_remaining:.1f}")
-        output.append(f"  Approx Kill Chance:     {result.kill_probability * 100:.1f}%")
-        output.append("")
-        
-        output.append("📊 Damage Distribution:")
-        sorted_damage = sorted(result.damage_distribution.items(), key=lambda x: x[1], reverse=True)[:12]
-        for damage, prob in sorted_damage:
-            if prob > 0.005:
-                bar = "█" * int(prob * 50)
-                output.append(f"  {damage:3d} damage: {prob * 100:5.1f}% {bar}")
-        
-        # Add selected wargear info
-        selected_wargear = self.get_selected_wargear()
-        if selected_wargear:
-            output.append("\n" + "=" * 80)
-            output.append("📦 Selected Wargear Options:")
-            for selection in selected_wargear:
-                option = selection['option']
-                count = selection['count']
-                choice = selection['choice']
-                desc = option.cleaned_description[:60]
-                if len(option.cleaned_description) > 60:
-                    desc += "..."
-                count_info = f" ({count} models)" if count > 0 else ""
-                choice_info = f" -> {choice}" if choice else ""
-                output.append(f"  • {desc}{count_info}{choice_info}")
-        
-        # Add loadout display
-        if self.current_loadout:
-            output.append("\n" + "=" * 80)
-            output.append("📋 Unit Loadout:")
-            for line in self.current_loadout.get_display_lines():
-                output.append(f"  {line}")
-        
-        self.result_text.insert(tk.END, "\n".join(output))
-    
-    def compare_all_weapons(self):
-        if not self.attacker_unit_data:
-            messagebox.showwarning("Missing Selection", "Please select an attacker unit.")
+
+    def current_modifiers(self) -> dict:
+        return dict(
+            half_range=self.half_range.get(),
+            cover=self.cover.get(),
+            charging=self.charging.get(),
+            moved_more_than_3=self.moved.get(),
+            hit_reroll=self.hit_reroll.get(),
+            wound_reroll=self.wound_reroll.get(),
+            sustained_override=int(self.sustained.get()),
+            lethal_override=self.lethal.get(),
+        )
+
+    def calculate(self):
+        if not self.attacker or not self.defender or not self.defender_stats:
+            messagebox.showwarning('Selection', 'Select attacker and defender first.')
             return
-        
-        if not self.defender_unit_data:
-            messagebox.showwarning("Missing Selection", "Please select a defender unit.")
+        group = self.selected_weapon_group()
+        if not group:
+            messagebox.showwarning('Weapon', 'No equipped weapon selected.')
             return
-        
-        if not self.attacker_weapons:
-            messagebox.showwarning("No Weapons", "No weapons found for the attacker.")
-            return
-        
-        if not self.defender_stats and self.defender_unit_data:
-            if self.defender_unit_data.models:
-                self.defender_stats = self.defender_unit_data.models[0]
-        
-        if not self.defender_stats:
-            messagebox.showwarning("No Stats", "Could not find defender stats.")
-            return
-        
         try:
-            attacker_count = int(self.attacker_count_spin.get())
-        except:
-            attacker_count = 5
-        
-        try:
-            defender_count = int(self.defender_count_spin.get())
-        except:
+            defender_count = int(self.defender_count.get())
+        except ValueError:
             defender_count = 10
-        
-        half_range = self.half_range_var.get()
-        cover = self.cover_var.get()
-        charging = self.charging_var.get()
-        moved = self.moved_var.get()
-        lethal = self.lethal_var.get()
-        
-        hit_reroll = self.hit_reroll_var.get()
-        reroll_hit_ones = hit_reroll == "ones"
-        reroll_hit_all = hit_reroll == "all"
-        
-        wound_reroll = self.wound_reroll_var.get()
-        reroll_wound_ones = wound_reroll == "ones"
-        reroll_wound_all = wound_reroll == "all"
-        
-        sustained = int(self.sustained_var.get())
-        defender_keywords = self.defender_keywords if self.defender_keywords else ['infantry']
-        
-        results = []
-        for weapon in self.attacker_weapons:
-            result = calculate_attack(
-                weapon=weapon,
-                attacker_stats=self.attacker_stats,
-                attacker_count=attacker_count,
-                defender_stats=self.defender_stats,
-                defender_count=defender_count,
-                defender_keywords=defender_keywords,
-                half_range=half_range,
-                cover=cover,
-                charging=charging,
-                moved_more_than_3=moved,
-                reroll_hit_ones=reroll_hit_ones,
-                reroll_hit_all=reroll_hit_all,
-                reroll_wound_ones=reroll_wound_ones,
-                reroll_wound_all=reroll_wound_all,
-                sustained_hits=sustained,
-                lethal_hits=lethal
-            )
-            results.append((weapon, result))
-        
-        results.sort(key=lambda x: x[1].expected_kills, reverse=True)
-        
-        self.result_text.delete(1.0, tk.END)
-        output = []
-        output.append(f"{'='*80}")
-        output.append(f"⚔️  WEAPON COMPARISON")
-        output.append(f"   {attacker_count} x {self.attacker_stats.name} vs {defender_count} x {self.defender_stats.name}")
-        output.append(f"   (T{self.defender_stats.toughness} Sv{self.defender_stats.save}+ W{self.defender_stats.wounds})")
-        output.append(f"{'='*80}\n")
-        
-        output.append(f"{'Weapon':<30} {'Hits':>8} {'Wounds':>8} {'Failed':>8} {'Damage':>8} {'Kills':>8} {'Kill%':>8}")
-        output.append("-" * 80)
-        
-        for weapon, result in results:
-            output.append(f"{weapon.name[:29]:<30} "
-                         f"{result.avg_hits:>8.1f} "
-                         f"{result.avg_wounds:>8.1f} "
-                         f"{result.avg_failed_saves:>8.1f} "
-                         f"{result.avg_total_damage:>8.1f} "
-                         f"{result.expected_kills:>8.2f} "
-                         f"{result.kill_probability * 100:>7.1f}%")
-        
-        self.result_text.insert(tk.END, "\n".join(output))
-    
-    def clear_results(self):
-        self.result_text.delete(1.0, tk.END)
-        self.last_result = None
-        self.status_var.set("Results cleared")
-    
-    def export_results(self):
-        if not hasattr(self, 'last_result') or self.last_result is None:
-            messagebox.showwarning("No Results", "Please calculate a result first.")
+        weapon, count = group
+        result = calculate_attack(
+            weapon, count, self.defender_stats, defender_count,
+            self.defender.keywords, **self.current_modifiers()
+        )
+        self.last_result = result
+        self.display_result(result, weapon)
+
+    def display_result(self, result: AttackResult, weapon: Weapon):
+        self.result_text.delete('1.0', tk.END)
+        out = [
+            '=' * 88,
+            f'{result.weapon_count} equipped copy/copies of {result.weapon_name}',
+            f'vs {result.defender_count} × {result.defender_model}',
+            '=' * 88,
+            '',
+            f'Weapon: A {dice_to_string(weapon.attacks_dice)}  {"WS" if weapon.is_melee else "BS"} {weapon.bs_ws}+  '
+            f'S {weapon.strength}  AP {weapon.ap}  D {dice_to_string(weapon.damage_dice)}',
+            f'Keywords: {weapon.keyword_string()}',
+            '',
+            'Per-die probabilities:',
+            f'  Hit:                    {result.hit_probability * 100:7.2f}%',
+            f'  Critical Hit:           {result.critical_hit_probability * 100:7.2f}%',
+            f'  Wound (rolled hit):     {result.wound_probability * 100:7.2f}%',
+            f'  Critical Wound:         {result.critical_wound_probability * 100:7.2f}%',
+            '',
+            'Expected values:',
+            f'  Attacks:                 {result.avg_attacks:8.3f}',
+            f'  Hits (incl. Sustained):  {result.avg_hits:8.3f}',
+            f'  Wounds:                  {result.avg_wounds:8.3f}',
+            f'  Failed normal saves:     {result.regular_failed_saves:8.3f}',
+            f'  Devastating bypasses:    {result.devastating_wounds:8.3f}',
+            f'  Raw average damage:      {result.avg_damage:8.3f}',
+            '',
+            'Exact casualty model:',
+            f'  Expected kills:          {result.expected_kills:8.3f}',
+            f'  Chance to kill >=1:      {result.kill_probability * 100:7.2f}%',
+            f'  Avg wounds on survivor:  {result.expected_remaining_wounds_on_current:8.3f}',
+            '',
+            'Effective damage distribution (after overkill is discarded):',
+        ]
+        for damage, prob in sorted(result.effective_damage_distribution.items()):
+            if prob >= 0.002:
+                bar = '█' * min(50, int(prob * 50))
+                out.append(f'  {damage:3d}: {prob * 100:6.2f}% {bar}')
+        self.result_text.insert(tk.END, '\n'.join(out))
+        self.status.set('Calculation complete - current wargear loadout is included.')
+
+    def compare_weapons(self):
+        if not self.defender or not self.defender_stats or not self.weapon_groups:
+            messagebox.showwarning('Selection', 'Select attacker, defender and equipped weapons first.')
             return
-        
-        filename = "mathhammer_results.txt"
         try:
-            with open(filename, 'w') as f:
-                f.write("40k 11th Edition MathHammer Results\n")
-                f.write("=" * 50 + "\n\n")
-                f.write(f"Attacker: {self.last_result.attacker_count} x {self.last_result.attacker_model} with {self.last_result.weapon_name}\n")
-                f.write(f"Defender: {self.last_result.defender_count} x {self.last_result.defender_model}\n\n")
-                f.write(f"Expected Kills: {self.last_result.expected_kills:.2f}\n")
-                f.write(f"Average Damage: {self.last_result.avg_total_damage:.2f}\n")
-                f.write(f"Kill Chance: {self.last_result.kill_probability * 100:.1f}%\n")
-                
-                # Add wargear info
-                selected_wargear = self.get_selected_wargear()
-                if selected_wargear:
-                    f.write("\nSelected Wargear Options:\n")
-                    for selection in selected_wargear:
-                        option = selection['option']
-                        count = selection['count']
-                        choice = selection['choice']
-                        desc = option.cleaned_description[:60]
-                        count_info = f" ({count} models)" if count > 0 else ""
-                        choice_info = f" -> {choice}" if choice else ""
-                        f.write(f"  - {desc}{count_info}{choice_info}\n")
-                
-                # Add loadout
-                if self.current_loadout:
-                    f.write("\nUnit Loadout:\n")
-                    for line in self.current_loadout.get_display_lines():
-                        f.write(f"  {line}\n")
-            
-            self.status_var.set(f"Results exported to {filename}")
-            messagebox.showinfo("Export Complete", f"Results saved to {filename}")
-        except Exception as e:
-            self.status_var.set(f"Export error: {e}")
-            messagebox.showerror("Export Error", str(e))
-    
-    def show_about(self):
-        messagebox.showinfo("About", 
-            "40k 11th Edition MathHammer\n\n"
-            "A probability calculator for Warhammer 40k.\n\n"
-            "Features:\n"
-            "• Full keyword support (Anti, Lethal, Sustained, etc.)\n"
-            "• Unit abilities from data files\n"
-            "• New Recruit-style wargear selection\n"
-            "• Model-by-model loadout display\n"
-            "• Weapon comparison mode\n"
-            "• Export results to file\n\n"
-            "Built with Python and Tkinter.\n"
-            "Data from Wahapedia exports.")
+            defender_count = int(self.defender_count.get())
+        except ValueError:
+            defender_count = 10
+        rows = []
+        for weapon, count in self.weapon_groups:
+            result = calculate_attack(
+                weapon, count, self.defender_stats, defender_count,
+                self.defender.keywords, **self.current_modifiers()
+            )
+            rows.append((weapon, count, result))
+        rows.sort(key=lambda item: (item[2].expected_kills, item[2].avg_damage), reverse=True)
 
+        self.result_text.delete('1.0', tk.END)
+        out = [
+            '=' * 110,
+            f'EQUIPPED WEAPON COMPARISON vs {defender_count} × {self.defender_stats.name}',
+            'Wargear selections are reflected in the copy count shown below.',
+            '=' * 110,
+            f"{'Weapon':<34} {'Qty':>4} {'Attacks':>9} {'Hits':>9} {'Wounds':>9} {'Damage':>9} {'Kills':>9} {'P(kill)':>9}",
+            '-' * 110,
+        ]
+        for weapon, count, result in rows:
+            label = f'{weapon.name} [{weapon.weapon_type}]'[:34]
+            out.append(
+                f'{label:<34} {count:>4} {result.avg_attacks:>9.2f} {result.avg_hits:>9.2f} '
+                f'{result.avg_wounds:>9.2f} {result.avg_damage:>9.2f} {result.expected_kills:>9.2f} '
+                f'{result.kill_probability * 100:>8.1f}%'
+            )
+        self.result_text.insert(tk.END, '\n'.join(out))
+        self.status.set('Compared currently equipped weapon groups.')
 
-# ============================================================
-# 10. MAIN
-# ============================================================
+    def clear_results(self):
+        self.result_text.delete('1.0', tk.END)
+        self.last_result = None
+
+    def export_results(self):
+        text = self.result_text.get('1.0', tk.END).strip()
+        if not text:
+            messagebox.showwarning('Export', 'Nothing to export.')
+            return
+        filename = 'mathhammer_results.txt'
+        try:
+            with open(filename, 'w', encoding='utf-8') as fh:
+                fh.write(text + '\n')
+            messagebox.showinfo('Export', f'Saved to {filename}')
+        except Exception as exc:
+            messagebox.showerror('Export', str(exc))
+
 
 def main():
     root = tk.Tk()
-    app = MathHammerGUI(root)
+    MathHammerGUI(root)
     root.mainloop()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
